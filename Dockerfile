@@ -14,6 +14,6 @@ FROM debian:buster-slim
 
 WORKDIR /usr/local/bin
 
-COPY --from=builder /app/target/release/rust-crud-api .
+COPY --from=builder /app/target/release/crud-hz-api .
 
-CMD ["./rust-crud-api"]
+CMD ["./crud-hz-api"]
