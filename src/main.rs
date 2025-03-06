@@ -8,9 +8,9 @@ use std::env;
 #[macro_use]
 extern crate serde_derive;
 
-//Model: USer struct with id, name, email
+//Model: org struct with id, name, email
 #[derive(Serialize, Deserialize)]
-struct User {
+struct org {
     id: Option<i32>,
     name: String,
     email: String,
@@ -79,16 +79,16 @@ fn handle_client(mut stream: TcpStream) {
 
 //handle_post_request function
 fn handle_post_request(request: &str) -> (String, String) {
-    match (get_user_request_body(&request), Client::connect(DB_URL, NoTls)) {
-        (Ok(user), Ok(mut client)) => {
+    match (get_org_request_body(&request), Client::connect(DB_URL, NoTls)) {
+        (Ok(org), Ok(mut client)) => {
             client
                 .execute(
                     "INSERT INTO orgs (name, email) VALUES ($1, $2)",
-                    &[&user.name, &user.email]
+                    &[&org.name, &org.email]
                 )
                 .unwrap();
 
-            (OK_RESPONSE.to_string(), "User created".to_string())
+            (OK_RESPONSE.to_string(), "org created".to_string())
         }
         _ => (INTERNAL_SERVER_ERROR.to_string(), "Error".to_string()),
     }
@@ -100,15 +100,15 @@ fn handle_get_request(request: &str) -> (String, String) {
         (Ok(id), Ok(mut client)) =>
             match client.query_one("SELECT * FROM orgs WHERE id = $1", &[&id]) {
                 Ok(row) => {
-                    let user = User {
+                    let org = org {
                         id: row.get(0),
                         name: row.get(1),
                         email: row.get(2),
                     };
 
-                    (OK_RESPONSE.to_string(), serde_json::to_string(&user).unwrap())
+                    (OK_RESPONSE.to_string(), serde_json::to_string(&org).unwrap())
                 }
-                _ => (NOT_FOUND.to_string(), "User not found".to_string()),
+                _ => (NOT_FOUND.to_string(), "org not found".to_string()),
             }
 
         _ => (INTERNAL_SERVER_ERROR.to_string(), "Error".to_string()),
@@ -122,7 +122,7 @@ fn handle_get_all_request(request: &str) -> (String, String) {
             let mut orgs = Vec::new();
 
             for row in client.query("SELECT * FROM orgs", &[]).unwrap() {
-                orgs.push(User {
+                orgs.push(org {
                     id: row.get(0),
                     name: row.get(1),
                     email: row.get(2),
@@ -140,19 +140,19 @@ fn handle_put_request(request: &str) -> (String, String) {
     match
         (
             get_id(&request).parse::<i32>(),
-            get_user_request_body(&request),
+            get_org_request_body(&request),
             Client::connect(DB_URL, NoTls),
         )
     {
-        (Ok(id), Ok(user), Ok(mut client)) => {
+        (Ok(id), Ok(org), Ok(mut client)) => {
             client
                 .execute(
                     "UPDATE orgs SET name = $1, email = $2 WHERE id = $3",
-                    &[&user.name, &user.email, &id]
+                    &[&org.name, &org.email, &id]
                 )
                 .unwrap();
 
-            (OK_RESPONSE.to_string(), "User updated".to_string())
+            (OK_RESPONSE.to_string(), "org updated".to_string())
         }
         _ => (INTERNAL_SERVER_ERROR.to_string(), "Error".to_string()),
     }
@@ -165,10 +165,10 @@ fn handle_delete_request(request: &str) -> (String, String) {
             let rows_affected = client.execute("DELETE FROM orgs WHERE id = $1", &[&id]).unwrap();
 
             if rows_affected == 0 {
-                return (NOT_FOUND.to_string(), "User not found".to_string());
+                return (NOT_FOUND.to_string(), "org not found".to_string());
             }
 
-            (OK_RESPONSE.to_string(), "User deleted".to_string())
+            (OK_RESPONSE.to_string(), "org deleted".to_string())
         }
         _ => (INTERNAL_SERVER_ERROR.to_string(), "Error".to_string()),
     }
@@ -195,7 +195,7 @@ fn get_id(request: &str) -> &str {
     request.split("/").nth(2).unwrap_or_default().split_whitespace().next().unwrap_or_default()
 }
 
-//deserialize user from request body with the id
-fn get_user_request_body(request: &str) -> Result<User, serde_json::Error> {
+//deserialize org from request body with the id
+fn get_org_request_body(request: &str) -> Result<org, serde_json::Error> {
     serde_json::from_str(request.split("\r\n\r\n").last().unwrap_or_default())
 }
