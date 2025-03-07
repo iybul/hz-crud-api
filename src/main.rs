@@ -4,20 +4,23 @@ use std::net::{ TcpListener, TcpStream };
 use std::io::{ Read, Write };
 use std::env;
 
-//pain
 #[macro_use]
 extern crate serde_derive;
 
-//Model: org struct with id, name, email
+//Model: User struct with id, name, email
 #[derive(Serialize, Deserialize)]
-struct org {
+struct User {
     id: Option<i32>,
     name: String,
     email: String,
 }
 
-//DATABASE_URL
-const DB_URL: &str = env!("DATABASE_URL");
+//DATABASE_URL - get at runtime instead of compile time
+fn get_db_url() -> String {
+    env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgres://postgres:postgres@db:5432/postgres".to_string()
+    })
+}
 
 //constants
 const OK_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n";
@@ -79,16 +82,16 @@ fn handle_client(mut stream: TcpStream) {
 
 //handle_post_request function
 fn handle_post_request(request: &str) -> (String, String) {
-    match (get_org_request_body(&request), Client::connect(DB_URL, NoTls)) {
-        (Ok(org), Ok(mut client)) => {
+    match (get_user_request_body(&request), Client::connect(&get_db_url(), NoTls)) {
+        (Ok(user), Ok(mut client)) => {
             client
                 .execute(
                     "INSERT INTO orgs (name, email) VALUES ($1, $2)",
-                    &[&org.name, &org.email]
+                    &[&user.name, &user.email]
                 )
                 .unwrap();
 
-            (OK_RESPONSE.to_string(), "org created".to_string())
+            (OK_RESPONSE.to_string(), "User created".to_string())
         }
         _ => (INTERNAL_SERVER_ERROR.to_string(), "Error".to_string()),
     }
@@ -96,19 +99,19 @@ fn handle_post_request(request: &str) -> (String, String) {
 
 //handle_get_request function
 fn handle_get_request(request: &str) -> (String, String) {
-    match (get_id(&request).parse::<i32>(), Client::connect(DB_URL, NoTls)) {
+    match (get_id(&request).parse::<i32>(), Client::connect(&get_db_url(), NoTls)) {
         (Ok(id), Ok(mut client)) =>
             match client.query_one("SELECT * FROM orgs WHERE id = $1", &[&id]) {
                 Ok(row) => {
-                    let org = org {
+                    let user = User {
                         id: row.get(0),
                         name: row.get(1),
                         email: row.get(2),
                     };
 
-                    (OK_RESPONSE.to_string(), serde_json::to_string(&org).unwrap())
+                    (OK_RESPONSE.to_string(), serde_json::to_string(&user).unwrap())
                 }
-                _ => (NOT_FOUND.to_string(), "org not found".to_string()),
+                _ => (NOT_FOUND.to_string(), "User not found".to_string()),
             }
 
         _ => (INTERNAL_SERVER_ERROR.to_string(), "Error".to_string()),
@@ -117,12 +120,12 @@ fn handle_get_request(request: &str) -> (String, String) {
 
 //handle_get_all_request function
 fn handle_get_all_request(request: &str) -> (String, String) {
-    match Client::connect(DB_URL, NoTls) {
+    match Client::connect(&get_db_url(), NoTls) {
         Ok(mut client) => {
             let mut orgs = Vec::new();
 
             for row in client.query("SELECT * FROM orgs", &[]).unwrap() {
-                orgs.push(org {
+                orgs.push(User {
                     id: row.get(0),
                     name: row.get(1),
                     email: row.get(2),
@@ -140,19 +143,19 @@ fn handle_put_request(request: &str) -> (String, String) {
     match
         (
             get_id(&request).parse::<i32>(),
-            get_org_request_body(&request),
-            Client::connect(DB_URL, NoTls),
+            get_user_request_body(&request),
+            Client::connect(&get_db_url(), NoTls),
         )
     {
-        (Ok(id), Ok(org), Ok(mut client)) => {
+        (Ok(id), Ok(user), Ok(mut client)) => {
             client
                 .execute(
                     "UPDATE orgs SET name = $1, email = $2 WHERE id = $3",
-                    &[&org.name, &org.email, &id]
+                    &[&user.name, &user.email, &id]
                 )
                 .unwrap();
 
-            (OK_RESPONSE.to_string(), "org updated".to_string())
+            (OK_RESPONSE.to_string(), "User updated".to_string())
         }
         _ => (INTERNAL_SERVER_ERROR.to_string(), "Error".to_string()),
     }
@@ -160,15 +163,15 @@ fn handle_put_request(request: &str) -> (String, String) {
 
 //handle_delete_request function
 fn handle_delete_request(request: &str) -> (String, String) {
-    match (get_id(&request).parse::<i32>(), Client::connect(DB_URL, NoTls)) {
+    match (get_id(&request).parse::<i32>(), Client::connect(&get_db_url(), NoTls)) {
         (Ok(id), Ok(mut client)) => {
             let rows_affected = client.execute("DELETE FROM orgs WHERE id = $1", &[&id]).unwrap();
 
             if rows_affected == 0 {
-                return (NOT_FOUND.to_string(), "org not found".to_string());
+                return (NOT_FOUND.to_string(), "User not found".to_string());
             }
 
-            (OK_RESPONSE.to_string(), "org deleted".to_string())
+            (OK_RESPONSE.to_string(), "User deleted".to_string())
         }
         _ => (INTERNAL_SERVER_ERROR.to_string(), "Error".to_string()),
     }
@@ -177,7 +180,7 @@ fn handle_delete_request(request: &str) -> (String, String) {
 //set_database function
 fn set_database() -> Result<(), PostgresError> {
     //DB Connection
-    let mut client = Client::connect(DB_URL, NoTls)?;
+    let mut client = Client::connect(&get_db_url(), NoTls)?;
 
     //Create table
     client.batch_execute(
@@ -195,7 +198,7 @@ fn get_id(request: &str) -> &str {
     request.split("/").nth(2).unwrap_or_default().split_whitespace().next().unwrap_or_default()
 }
 
-//deserialize org from request body with the id
-fn get_org_request_body(request: &str) -> Result<org, serde_json::Error> {
+//deserialize user from request body with the id
+fn get_user_request_body(request: &str) -> Result<User, serde_json::Error> {
     serde_json::from_str(request.split("\r\n\r\n").last().unwrap_or_default())
 }
