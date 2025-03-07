@@ -19,6 +19,8 @@ Navigate to base directory
 
     docker-compose up -build
 
-This may require 
+If this fails and you are running it with `sudo` don't. 
+Instead:
 
-    sudo 
+    `sudo chown -R $(whoami) ~/.docker`
+
