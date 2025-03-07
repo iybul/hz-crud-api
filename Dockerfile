@@ -1,19 +1,18 @@
-FROM rust:1.85.0-bookworm as builder
+FROM rust:1.75 as builder
 
-WORKDIR /app
+WORKDIR /usr/src/app
+COPY . .
 
-ARG DATABASE_URL
-
-ENV DATABASE_URL=$DATABASE_URL
-
-COPY . . 
-
+# Build the application
 RUN cargo build --release
 
-FROM debian:buster-slim
+# Runtime stage
+FROM debian:bullseye-slim
 
 WORKDIR /usr/local/bin
+COPY --from=builder /usr/src/app/target/release/crud-hz-api .
 
-COPY --from=builder /app/target/release/crud-hz-api .
+ARG DATABASE_URL
+ENV DATABASE_URL=$DATABASE_URL
 
 CMD ["./crud-hz-api"]
