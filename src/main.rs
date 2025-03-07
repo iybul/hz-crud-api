@@ -7,13 +7,41 @@ use std::env;
 #[macro_use]
 extern crate serde_derive;
 
-//Model: User struct with id, name, email
+//Definition is used for Org despite being called user
+//FIXME: Change all iterations of user to org
 #[derive(Serialize, Deserialize)]
 struct User {
     id: Option<i32>,
     name: String,
     email: String,
 }
+
+#[derive(Serialize, Deserialize)]
+struct Employee {
+    id: Option<i32>,
+    name: String,
+    role: String,
+    org_id: i32,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Recipes {
+    id: Option<i32>,
+    lotcode: String,
+    org_id: i32,
+    ingredients: i32,
+    description: String,
+}
+
+#derive(Serialize, Deserialize)
+struct Ingredients {
+    id: Option<i32>
+    lotcode: String,
+    name: String,
+    dater: String,
+    org_id: i32
+}
+
 
 //DATABASE_URL - get at runtime instead of compile time
 fn get_db_url() -> String {
@@ -67,6 +95,22 @@ fn handle_client(mut stream: TcpStream) {
                 r if r.starts_with("GET /orgs") => handle_get_all_request(r),
                 r if r.starts_with("PUT /orgs/") => handle_put_request(r),
                 r if r.starts_with("DELETE /orgs/") => handle_delete_request(r),
+
+                r if r.starts_with("POST /orgs/employees") => handle_post_request(r),
+                r if r.starts_with("GET /orgs/employees") => handle_post_request(r),
+                r if r.starts_with("PUT /orgs/employees") => handle_post_request(r),
+                r if r.starts_with("DELETE /orgs/employees") => handle_post_request(r),
+
+                r if r.starts_with("POST /orgs/recipes") => handle_post_request(r),
+                r if r.starts_with("GET /orgs/recipes") => handle_post_request(r),
+                r if r.starts_with("PUT /orgs/recipes") => handle_post_request(r),
+                r if r.starts_with("DELETE /orgs/recipes") => handle_post_request(r),
+
+                r if r.starts_with("POST /orgs/ingredients") => handle_post_request(r),
+                r if r.starts_with("GET /orgs/ingredients") => handle_post_request(r),
+                r if r.starts_with("PUT /orgs/ingredients") => handle_post_request(r),
+                r if r.starts_with("DELETE /orgs/ingredients") => handle_post_request(r),
+
                 _ => (NOT_FOUND.to_string(), "404 Not Found".to_string()),
             };
 
@@ -190,6 +234,37 @@ fn set_database() -> Result<(), PostgresError> {
             email VARCHAR NOT NULL
         )"
     )?;
+
+    client.batch_execute(
+        "CREATE TABLE IF NOT EXISTS employess (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR NOT NULL,
+            role VARCHAR NOT NULL,
+            org INTEGER REFERENCES orgs(id)
+        )"
+    )?;
+
+    client.batch_execute(
+        "CREATE TABLE IF NOT EXISTS recipes (
+            id  SERIAL PRIMARY KEY,
+            lotcode VARCHAR NOT NULL,
+            name VARCHAR NOT NULL,
+            datemade DATE NOT NULL,
+            ingredients INTEGER REFERENCES ingredients(id)[]
+            description TEXT,  
+        )"
+    )?;
+
+    client.batch_execute(
+        "CREATE TABLE IF NOT EXISTS ingredients (
+            id SERIAL PRIMARY KEY,
+            lotcode VARCHAR NOT NULL,
+            name VARCHAR NOT NULL
+            dater DATE NOT NULL,
+            org INTEGER REFERENCES ORGS(id)
+        )"
+    )?;
+
     Ok(())
 }
 
