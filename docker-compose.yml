@@ -1,5 +1,3 @@
-version: '3.9'
-
 services:
   rustapp:
     container_name: rust-api
@@ -8,12 +6,12 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      DATABASE_URL: postgres://postgres:postgres@db:5432/postgres
+      DATABASE_URL: postgres://postgres:postgres@postgresdb:5432/postgres
     ports:
       - '8080:8080'
     depends_on:
       - postgresdb
-      
+
   postgresdb:
     container_name: db
     image: postgres:17.4-alpine3.21
@@ -24,7 +22,7 @@ services:
       POSTGRES_PASSWORD: 'postgres'
       POSTGRES_DB: 'postgres'
     volumes:
-      - pgvolume:/var/lib/postgres/data
+      - pgvolume:/var/lib/postgres/data    
 
 volumes:
   pgvolume: {}
