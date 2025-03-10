@@ -1,16 +1,12 @@
-use postgres::{ Client, NoTls };
-use postgres::Error as PostgresError;
-use std::net::{ TcpListener, TcpStream };
-use std::io::{ Read, Write };
+use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use dotenv::dotenv;
+use serde::{Deserialize, Serialize};
+use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
 use std::env;
 
-#[macro_use]
-extern crate serde_derive;
-
-//Definition is used for Org despite being called user
-//FIXME: Change all iterations of user to org
+// Organization entity (renamed from User)
 #[derive(Serialize, Deserialize)]
-struct User {
+struct Organization {
     id: Option<i32>,
     name: String,
     email: String,
@@ -25,255 +21,263 @@ struct Employee {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Recipes {
+struct Recipe {
     id: Option<i32>,
     lotcode: String,
+    name: String,
+    date_made: String,  // Consider using chrono::NaiveDate
     org_id: i32,
-    ingredients: i32,
+    ingredients: Vec<i32>,  // List of ingredient IDs
     description: String,
 }
 
-#derive(Serialize, Deserialize)
-struct Ingredients {
-    id: Option<i32>
+#[derive(Serialize, Deserialize)]
+struct Ingredient {
+    id: Option<i32>,
     lotcode: String,
     name: String,
-    dater: String,
-    org_id: i32
+    date: String,  // Consider using chrono::NaiveDate
+    org_id: i32,
 }
 
-
-//DATABASE_URL - get at runtime instead of compile time
-fn get_db_url() -> String {
-    env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://postgres:postgres@db:5432/postgres".to_string()
-    })
+// Application state
+struct AppState {
+    db_pool: Pool<Postgres>,
 }
 
-//constants
-const OK_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n";
-const NOT_FOUND: &str = "HTTP/1.1 404 NOT FOUND\r\n\r\n";
-const INTERNAL_SERVER_ERROR: &str = "HTTP/1.1 500 INTERNAL SERVER ERROR\r\n\r\n";
-
-//main function
-fn main() {
-    //Set database
-    if let Err(e) = set_database() {
-        println!("Error: {}", e);
-        return;
-    }
-
-    //start server and print port
-    let listener = TcpListener::bind(format!("0.0.0.0:8080")).unwrap();
-    println!("Server started at port 8080");
-
-    //handle the client
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                handle_client(stream);
-            }
-            Err(e) => {
-                println!("Error: {}", e);
-            }
-        }
-    }
+// Health check endpoint
+async fn health_check() -> impl Responder {
+    HttpResponse::Ok().json(serde_json::json!({"status": "healthy"}))
 }
 
-//handle_client function
-fn handle_client(mut stream: TcpStream) {
-    let mut buffer = [0; 1024];
-    let mut request = String::new();
-
-    match stream.read(&mut buffer) {
-        Ok(size) => {
-            request.push_str(String::from_utf8_lossy(&buffer[..size]).as_ref());
-
-            let (status_line, content) = match &*request {
-                r if r.starts_with("POST /orgs") => handle_post_request(r),
-                r if r.starts_with("GET /orgs/") => handle_get_request(r),
-                r if r.starts_with("GET /orgs") => handle_get_all_request(r),
-                r if r.starts_with("PUT /orgs/") => handle_put_request(r),
-                r if r.starts_with("DELETE /orgs/") => handle_delete_request(r),
-
-                r if r.starts_with("POST /orgs/employees") => handle_post_request(r),
-                r if r.starts_with("GET /orgs/employees") => handle_post_request(r),
-                r if r.starts_with("PUT /orgs/employees") => handle_post_request(r),
-                r if r.starts_with("DELETE /orgs/employees") => handle_post_request(r),
-
-                r if r.starts_with("POST /orgs/recipes") => handle_post_request(r),
-                r if r.starts_with("GET /orgs/recipes") => handle_post_request(r),
-                r if r.starts_with("PUT /orgs/recipes") => handle_post_request(r),
-                r if r.starts_with("DELETE /orgs/recipes") => handle_post_request(r),
-
-                r if r.starts_with("POST /orgs/ingredients") => handle_post_request(r),
-                r if r.starts_with("GET /orgs/ingredients") => handle_post_request(r),
-                r if r.starts_with("PUT /orgs/ingredients") => handle_post_request(r),
-                r if r.starts_with("DELETE /orgs/ingredients") => handle_post_request(r),
-
-                _ => (NOT_FOUND.to_string(), "404 Not Found".to_string()),
+// Organization endpoints
+async fn create_organization(
+    org: web::Json<Organization>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    match sqlx::query!(
+        "INSERT INTO organizations (name, email) VALUES ($1, $2) RETURNING id",
+        org.name,
+        org.email
+    )
+    .fetch_one(&data.db_pool)
+    .await
+    {
+        Ok(record) => {
+            let created_org = Organization {
+                id: Some(record.id),
+                name: org.name.clone(),
+                email: org.email.clone(),
             };
-
-            stream.write_all(format!("{}{}", status_line, content).as_bytes()).unwrap();
+            HttpResponse::Created().json(created_org)
         }
         Err(e) => {
-            println!("Error: {}", e);
+            eprintln!("Failed to create organization: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to create organization"}))
         }
     }
 }
 
-//CONTROLLERS
-
-//handle_post_request function
-fn handle_post_request(request: &str) -> (String, String) {
-    match (get_user_request_body(&request), Client::connect(&get_db_url(), NoTls)) {
-        (Ok(user), Ok(mut client)) => {
-            client
-                .execute(
-                    "INSERT INTO orgs (name, email) VALUES ($1, $2)",
-                    &[&user.name, &user.email]
-                )
-                .unwrap();
-
-            (OK_RESPONSE.to_string(), "User created".to_string())
-        }
-        _ => (INTERNAL_SERVER_ERROR.to_string(), "Error".to_string()),
-    }
-}
-
-//handle_get_request function
-fn handle_get_request(request: &str) -> (String, String) {
-    match (get_id(&request).parse::<i32>(), Client::connect(&get_db_url(), NoTls)) {
-        (Ok(id), Ok(mut client)) =>
-            match client.query_one("SELECT * FROM orgs WHERE id = $1", &[&id]) {
-                Ok(row) => {
-                    let user = User {
-                        id: row.get(0),
-                        name: row.get(1),
-                        email: row.get(2),
-                    };
-
-                    (OK_RESPONSE.to_string(), serde_json::to_string(&user).unwrap())
-                }
-                _ => (NOT_FOUND.to_string(), "User not found".to_string()),
-            }
-
-        _ => (INTERNAL_SERVER_ERROR.to_string(), "Error".to_string()),
-    }
-}
-
-//handle_get_all_request function
-fn handle_get_all_request(request: &str) -> (String, String) {
-    match Client::connect(&get_db_url(), NoTls) {
-        Ok(mut client) => {
-            let mut orgs = Vec::new();
-
-            for row in client.query("SELECT * FROM orgs", &[]).unwrap() {
-                orgs.push(User {
-                    id: row.get(0),
-                    name: row.get(1),
-                    email: row.get(2),
-                });
-            }
-
-            (OK_RESPONSE.to_string(), serde_json::to_string(&orgs).unwrap())
-        }
-        _ => (INTERNAL_SERVER_ERROR.to_string(), "Error".to_string()),
-    }
-}
-
-//handle_put_request function
-fn handle_put_request(request: &str) -> (String, String) {
-    match
-        (
-            get_id(&request).parse::<i32>(),
-            get_user_request_body(&request),
-            Client::connect(&get_db_url(), NoTls),
-        )
+async fn get_organization(
+    path: web::Path<i32>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let id = path.into_inner();
+    
+    match sqlx::query_as!(
+        Organization,
+        "SELECT id, name, email FROM organizations WHERE id = $1",
+        id
+    )
+    .fetch_optional(&data.db_pool)
+    .await
     {
-        (Ok(id), Ok(user), Ok(mut client)) => {
-            client
-                .execute(
-                    "UPDATE orgs SET name = $1, email = $2 WHERE id = $3",
-                    &[&user.name, &user.email, &id]
-                )
-                .unwrap();
-
-            (OK_RESPONSE.to_string(), "User updated".to_string())
+        Ok(Some(org)) => HttpResponse::Ok().json(org),
+        Ok(None) => HttpResponse::NotFound().json(serde_json::json!({"error": "Organization not found"})),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
         }
-        _ => (INTERNAL_SERVER_ERROR.to_string(), "Error".to_string()),
     }
 }
 
-//handle_delete_request function
-fn handle_delete_request(request: &str) -> (String, String) {
-    match (get_id(&request).parse::<i32>(), Client::connect(&get_db_url(), NoTls)) {
-        (Ok(id), Ok(mut client)) => {
-            let rows_affected = client.execute("DELETE FROM orgs WHERE id = $1", &[&id]).unwrap();
-
-            if rows_affected == 0 {
-                return (NOT_FOUND.to_string(), "User not found".to_string());
-            }
-
-            (OK_RESPONSE.to_string(), "User deleted".to_string())
+async fn get_all_organizations(
+    data: web::Data<AppState>,
+) -> impl Responder {
+    match sqlx::query_as!(
+        Organization,
+        "SELECT id, name, email FROM organizations"
+    )
+    .fetch_all(&data.db_pool)
+    .await
+    {
+        Ok(orgs) => HttpResponse::Ok().json(orgs),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
         }
-        _ => (INTERNAL_SERVER_ERROR.to_string(), "Error".to_string()),
     }
 }
 
-//set_database function
-fn set_database() -> Result<(), PostgresError> {
-    //DB Connection
-    let mut client = Client::connect(&get_db_url(), NoTls)?;
+async fn update_organization(
+    path: web::Path<i32>,
+    org: web::Json<Organization>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let id = path.into_inner();
+    
+    match sqlx::query!(
+        "UPDATE organizations SET name = $1, email = $2 WHERE id = $3 RETURNING id",
+        org.name,
+        org.email,
+        id
+    )
+    .fetch_optional(&data.db_pool)
+    .await
+    {
+        Ok(Some(_)) => {
+            let updated_org = Organization {
+                id: Some(id),
+                name: org.name.clone(),
+                email: org.email.clone(),
+            };
+            HttpResponse::Ok().json(updated_org)
+        }
+        Ok(None) => HttpResponse::NotFound().json(serde_json::json!({"error": "Organization not found"})),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
+        }
+    }
+}
 
-    //Create table
-    client.batch_execute(
-        "CREATE TABLE IF NOT EXISTS orgs (
+async fn delete_organization(
+    path: web::Path<i32>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let id = path.into_inner();
+    
+    match sqlx::query!("DELETE FROM organizations WHERE id = $1 RETURNING id", id)
+        .fetch_optional(&data.db_pool)
+        .await
+    {
+        Ok(Some(_)) => HttpResponse::NoContent().finish(),
+        Ok(None) => HttpResponse::NotFound().json(serde_json::json!({"error": "Organization not found"})),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
+        }
+    }
+}
+
+// Initialize database tables
+async fn init_database(pool: &Pool<Postgres>) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        "CREATE TABLE IF NOT EXISTS organizations (
             id SERIAL PRIMARY KEY,
             name VARCHAR NOT NULL,
             email VARCHAR NOT NULL
         )"
-    )?;
+    )
+    .execute(pool)
+    .await?;
 
-    client.batch_execute(
-        "CREATE TABLE IF NOT EXISTS employess (
+    sqlx::query!(
+        "CREATE TABLE IF NOT EXISTS employees (
             id SERIAL PRIMARY KEY,
             name VARCHAR NOT NULL,
             role VARCHAR NOT NULL,
-            org INTEGER REFERENCES orgs(id)
+            org_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE
         )"
-    )?;
+    )
+    .execute(pool)
+    .await?;
 
-    client.batch_execute(
-        "CREATE TABLE IF NOT EXISTS recipes (
-            id  SERIAL PRIMARY KEY,
-            lotcode VARCHAR NOT NULL,
-            name VARCHAR NOT NULL,
-            datemade DATE NOT NULL,
-            ingredients INTEGER REFERENCES ingredients(id)[]
-            description TEXT,  
-        )"
-    )?;
-
-    client.batch_execute(
+    sqlx::query!(
         "CREATE TABLE IF NOT EXISTS ingredients (
             id SERIAL PRIMARY KEY,
             lotcode VARCHAR NOT NULL,
-            name VARCHAR NOT NULL
-            dater DATE NOT NULL,
-            org INTEGER REFERENCES ORGS(id)
+            name VARCHAR NOT NULL,
+            date DATE NOT NULL,
+            org_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE
         )"
-    )?;
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query!(
+        "CREATE TABLE IF NOT EXISTS recipes (
+            id SERIAL PRIMARY KEY,
+            lotcode VARCHAR NOT NULL,
+            name VARCHAR NOT NULL,
+            date_made DATE NOT NULL,
+            org_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE,
+            description TEXT
+        )"
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query!(
+        "CREATE TABLE IF NOT EXISTS recipe_ingredients (
+            recipe_id INTEGER REFERENCES recipes(id) ON DELETE CASCADE,
+            ingredient_id INTEGER REFERENCES ingredients(id) ON DELETE CASCADE,
+            PRIMARY KEY (recipe_id, ingredient_id)
+        )"
+    )
+    .execute(pool)
+    .await?;
 
     Ok(())
 }
 
-//get_id function
-fn get_id(request: &str) -> &str {
-    request.split("/").nth(2).unwrap_or_default().split_whitespace().next().unwrap_or_default()
-}
-
-//deserialize user from request body with the id
-fn get_user_request_body(request: &str) -> Result<User, serde_json::Error> {
-    serde_json::from_str(request.split("\r\n\r\n").last().unwrap_or_default())
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    // Load environment variables from .env file
+    dotenv().ok();
+    
+    // Initialize logger
+    env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
+    
+    // Set up database connection pool
+    let database_url = env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@db:5432/postgres".to_string());
+        
+    let db_pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await
+        .expect("Failed to create database connection pool");
+    
+    // Initialize database tables
+    if let Err(e) = init_database(&db_pool).await {
+        eprintln!("Error setting up database: {}", e);
+        std::process::exit(1);
+    }
+    
+    log::info!("Starting server at http://0.0.0.0:8080");
+    
+    // Start HTTP server
+    HttpServer::new(move || {
+        App::new()
+            .app_data(web::Data::new(AppState {
+                db_pool: db_pool.clone(),
+            }))
+            .route("/health", web::get().to(health_check))
+            .service(
+                web::scope("/api")
+                    .service(
+                        web::scope("/orgs")
+                            .route("", web::post().to(create_organization))
+                            .route("", web::get().to(get_all_organizations))
+                            .route("/{id}", web::get().to(get_organization))
+                            .route("/{id}", web::put().to(update_organization))
+                            .route("/{id}", web::delete().to(delete_organization))
+                    )
+                    // Add additional routes for employees, recipes, and ingredients here
+            )
+    })
+    .bind("0.0.0.0:8080")?
+    .run()
+    .await
 }
