@@ -1,5 +1,5 @@
 # Builder stage with Rust
-FROM rust:1.75 as builder
+FROM rust:1.85 as builder
 
 # Install musl-tools for static compilation
 RUN apt-get update && apt-get install -y musl-tools
