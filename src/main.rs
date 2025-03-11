@@ -12,11 +12,11 @@ use std::env;
 extern crate serde_derive;
 
 // Organization entity (renamed from User)
-#[derive(Serialize, Deserialize)]
-struct Organization {
-    id: Option<i32>,
-    name: String,
-    email: String,
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Organization {
+    pub id: Option<i32>,
+    pub name: String,
+    pub email: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -239,6 +239,27 @@ async fn delete_organization(
 //     Ok(())
 // }
 
+// Configure app with database pool
+pub fn configure_app(config: &mut web::ServiceConfig, db_pool: Pool<Postgres>) {
+    config
+        .app_data(web::Data::new(AppState {
+            db_pool: db_pool.clone(),
+        }))
+        .route("/health", web::get().to(health_check))
+        .service(
+            web::scope("/api")
+                .service(
+                    web::scope("/orgs")
+                        .route("", web::post().to(create_organization))
+                        .route("", web::get().to(get_all_organizations))
+                        .route("/{id}", web::get().to(get_organization))
+                        .route("/{id}", web::put().to(update_organization))
+                        .route("/{id}", web::delete().to(delete_organization))
+                )
+                // Add additional routes for employees, recipes, and ingredients here
+        );
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Load environment variables from .env file
@@ -263,32 +284,11 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to run database migrations");
     
-    
-    // Initialize database tables
-    // if let Err(e) = init_database(&db_pool).await {
-    //     eprintln!("Error setting up database: {}", e);
-    //     std::process::exit(1);
-    // }
-        
     // Start HTTP server
     HttpServer::new(move || {
-        App::new()
-            .app_data(web::Data::new(AppState {
-                db_pool: db_pool.clone(),
-            }))
-            .route("/health", web::get().to(health_check))
-            .service(
-                web::scope("/api")
-                    .service(
-                        web::scope("/orgs")
-                            .route("", web::post().to(create_organization))
-                            .route("", web::get().to(get_all_organizations))
-                            .route("/{id}", web::get().to(get_organization))
-                            .route("/{id}", web::put().to(update_organization))
-                            .route("/{id}", web::delete().to(delete_organization))
-                    )
-                    // Add additional routes for employees, recipes, and ingredients here
-            )
+        App::new().configure(|config| {
+            configure_app(config, db_pool.clone());
+        })
     })
     .bind("0.0.0.0:8080")?
     .run()
