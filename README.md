@@ -39,7 +39,7 @@ Delete: DELETE to /api/orgs/{id}
 
 Note: Employee, recipe, and ingredient endpoints are mentioned in comments but not fully implemented in this code.
 
-## To run
+## To run locally
 
 Make sure you have **Docker** installed 
 
@@ -52,11 +52,16 @@ This may require
 
     docker login
 
+Run:
 
-Navigate to base directory
+`docker-compose up postgresdb -d`
+`export DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres`
+`cargo sqlx prepare`
+
+Then 
 
     docker-compose up -build
-
+`
 If this fails and you are running it with `sudo` don't. 
 Instead:
 

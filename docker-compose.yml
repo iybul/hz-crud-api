@@ -6,17 +6,25 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
-      DATABASE_URL: postgres://postgres:postgres@postgresdb:5432/postgres
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
     ports:
       - '8080:8080'
     depends_on:
       - postgresdb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8050/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   postgresdb:
-    container_name: db
+    container_name: postgresdb
     image: postgres:17.4-alpine3.21
+    restart: unless-stopped
     ports:
       - '5432:5432'
+      - '8050:8050'
     environment:
       POSTGRES_USER: 'postgres'
       POSTGRES_PASSWORD: 'postgres'

@@ -62,7 +62,7 @@ async fn create_organization(
     org: web::Json<Organization>,
     data: web::Data<AppState>,
 ) -> impl Responder {
-    match sqlx::query_unchecked!(
+    match sqlx::query!(
         "INSERT INTO organizations (name, email) VALUES ($1, $2) RETURNING id",
         org.name,
         org.email
@@ -91,7 +91,7 @@ async fn get_organization(
 ) -> impl Responder {
     let id = path.into_inner();
     
-    match sqlx::query_as_unchecked!(
+    match sqlx::query_as!(
         Organization,
         "SELECT id, name, email FROM organizations WHERE id = $1",
         id
@@ -112,7 +112,7 @@ async fn get_all_organizations(
     data: web::Data<AppState>,
 ) -> impl Responder {
     //TODO: REMOVE QUERY UNCHECKED SO THAT THE QUERYS ARENOT CHECKED AT RUNTIME
-    match sqlx::query_as_unchecked!(
+    match sqlx::query_as!(
         Organization,
         "SELECT id, name, email FROM organizations"
     )
@@ -134,7 +134,7 @@ async fn update_organization(
 ) -> impl Responder {
     let id = path.into_inner();
     
-    match sqlx::query_unchecked!(
+    match sqlx::query!(
         "UPDATE organizations SET name = $1, email = $2 WHERE id = $3 RETURNING id",
         org.name,
         org.email,
@@ -165,7 +165,7 @@ async fn delete_organization(
 ) -> impl Responder {
     let id = path.into_inner();
     
-    match sqlx::query_unchecked!("DELETE FROM organizations WHERE id = $1 RETURNING id", id)
+    match sqlx::query!("DELETE FROM organizations WHERE id = $1 RETURNING id", id)
         .fetch_optional(&data.db_pool)
         .await
     {
@@ -180,7 +180,7 @@ async fn delete_organization(
 
 // Initialize database tables
 async fn init_database(pool: &Pool<Postgres>) -> Result<(), sqlx::Error> {
-    sqlx::query_unchecked!(
+    sqlx::query!(
         "CREATE TABLE IF NOT EXISTS organizations (
             id SERIAL PRIMARY KEY,
             name VARCHAR NOT NULL,
@@ -190,7 +190,7 @@ async fn init_database(pool: &Pool<Postgres>) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
-    sqlx::query_unchecked!(
+    sqlx::query!(
         "CREATE TABLE IF NOT EXISTS employees (
             id SERIAL PRIMARY KEY,
             name VARCHAR NOT NULL,
@@ -201,7 +201,7 @@ async fn init_database(pool: &Pool<Postgres>) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
-    sqlx::query_unchecked!(
+    sqlx::query!(
         "CREATE TABLE IF NOT EXISTS ingredients (
             id SERIAL PRIMARY KEY,
             lotcode VARCHAR NOT NULL,
@@ -213,7 +213,7 @@ async fn init_database(pool: &Pool<Postgres>) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
-    sqlx::query_unchecked!(
+    sqlx::query!(
         "CREATE TABLE IF NOT EXISTS recipes (
             id SERIAL PRIMARY KEY,
             lotcode VARCHAR NOT NULL,
@@ -226,7 +226,7 @@ async fn init_database(pool: &Pool<Postgres>) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
-    sqlx::query_unchecked!(
+    sqlx::query!(
         "CREATE TABLE IF NOT EXISTS recipe_ingredients (
             recipe_id INTEGER REFERENCES recipes(id) ON DELETE CASCADE,
             ingredient_id INTEGER REFERENCES ingredients(id) ON DELETE CASCADE,
@@ -250,21 +250,26 @@ async fn main() -> std::io::Result<()> {
     // Set up database connection pool
     let database_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://postgres:postgres@db:5432/postgres".to_string());
-
+        
     let db_pool = PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await
         .expect("Failed to create database connection pool");
     
+    // Run migrations instead of init_database
+    sqlx::migrate!("./migrations")
+        .run(&db_pool)
+        .await
+        .expect("Failed to run database migrations");
+    
+    
     // Initialize database tables
     if let Err(e) = init_database(&db_pool).await {
         eprintln!("Error setting up database: {}", e);
         std::process::exit(1);
     }
-    
-    log::info!("Starting server at http://0.0.0.0:8080");
-    
+        
     // Start HTTP server
     HttpServer::new(move || {
         App::new()
