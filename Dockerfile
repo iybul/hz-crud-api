@@ -7,35 +7,32 @@ RUN rustup target add aarch64-unknown-linux-musl
 
 WORKDIR /usr/src/app
 
-# Copy Cargo files first for better caching
-COPY Cargo.toml Cargo.lock ./
-
-# Create a dummy src/main.rs to build dependencies
-RUN mkdir -p src && \
-    echo "fn main() {println!(\"placeholder\")}" > src/main.rs && \
-    cargo build --release --target aarch64-unknown-linux-musl && \
-    rm -rf src
-
-# Copy actual code and migrations
-COPY src/ src/
-COPY migrations/ migrations/
+# Copy everything to the build context
+COPY . .
 
 # Install sqlx-cli
 RUN cargo install sqlx-cli --no-default-features --features postgres
 
-# Build the application
+# Build the application directly
 RUN cargo build --release --target aarch64-unknown-linux-musl
+
+# Print contents of the target directory to verify the binary exists
+RUN ls -la target/aarch64-unknown-linux-musl/release/
 
 # Alpine for lightweight and the static library
 FROM alpine:latest
 
 WORKDIR /usr/local/bin
 
-# Copy the statically-linked binary from the builder stage 
+# Copy the statically-linked binary from the builder stage
+# Make sure this binary name matches your actual binary
 COPY --from=builder /usr/src/app/target/aarch64-unknown-linux-musl/release/crud-hz-api .
 
 # Copy migrations folder to the final image
 COPY --from=builder /usr/src/app/migrations /usr/local/bin/migrations
+
+# Run migration
+RUN sqlx migrate add create_tables
 
 # Make it executable
 RUN chmod +x ./crud-hz-api
@@ -43,5 +40,8 @@ RUN chmod +x ./crud-hz-api
 # Set the DATABASE_URL for runtime
 ENV DATABASE_URL=postgres://postgres:postgres@db:5432/postgres
 
-# Command to run the application
-CMD ["./crud-hz-api"]
+# For debugging, print current directory contents
+RUN ls -la
+
+# Add explicit output to show the container is starting
+CMD echo "Starting application" && ./crud-hz-api
