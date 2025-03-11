@@ -60,6 +60,7 @@ Run:
 docker-compose up db -d
 sqlx migrate add create_tables
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
+cargo sqlx migrate run
 cargo sqlx prepare
 ```
 

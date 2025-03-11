@@ -1,47 +1,24 @@
-# Builder stage with Rust
+# Build stage
 FROM rust:1.85 as builder
 
-# Install musl-tools for static compilation
-RUN apt-get update && apt-get install -y musl-tools
-RUN rustup target add aarch64-unknown-linux-musl
+WORKDIR /app
 
-WORKDIR /usr/src/app
+# accept the build argument
+ARG DATABASE_URL
 
-# Copy everything to the build context
-COPY . .
+ENV DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
 
-# Install sqlx-cli
-RUN cargo install sqlx-cli --no-default-features --features postgres
+COPY . . 
 
-# Build the application directly
-RUN cargo build --release --target aarch64-unknown-linux-musl
+RUN cargo build --release
 
-# Print contents of the target directory to verify the binary exists
-RUN ls -la target/aarch64-unknown-linux-musl/release/
-
-# Alpine for lightweight and the static library
-FROM alpine:latest
+# Production stage
+FROM debian:buster-slim
 
 WORKDIR /usr/local/bin
 
-# Copy the statically-linked binary from the builder stage
-# Make sure this binary name matches your actual binary
-COPY --from=builder /usr/src/app/target/aarch64-unknown-linux-musl/release/crud-hz-api .
+COPY --from=builder /app/target/release/rust-crud-api .
 
-# Copy migrations folder to the final image
-COPY --from=builder /usr/src/app/migrations /usr/local/bin/migrations
+ENV DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
 
-# Run migration
-RUN cargo sqlx migrate run
-
-# Make it executable
-RUN chmod +x ./crud-hz-api
-
-# Set the DATABASE_URL for runtime
-ENV DATABASE_URL=postgres://postgres:postgres@db:5432/postgres
-
-# For debugging, print current directory contents
-RUN ls -la
-
-# Add explicit output to show the container is starting
-CMD echo "Starting application" && ./crud-hz-api
+CMD ["./crud-hz-api"]
