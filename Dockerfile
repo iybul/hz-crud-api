@@ -10,7 +10,7 @@ COPY . .
 
 # Add the offline feature to your sqlx dependency in Cargo.toml
 # This should be done before building
-RUN sed -i 's/sqlx = { version = "[^"]*", features = \["postgres", "runtime-tokio-rustls"\]/sqlx = { version = "\0", features = ["postgres", "runtime-tokio-rustls", "offline", "migrations"]/g' Cargo.toml
+RUN sed -i 's/sqlx = { version = "[^"]*", features = \["postgres", "runtime-tokio-rustls"\]/sqlx = { version = "\0", features = ["postgres", "runtime-tokio-rustls", "offline", "migrate"]/g' Cargo.toml
 
 # Set the DATABASE_URL environment variable for the build
 ENV DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
