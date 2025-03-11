@@ -33,7 +33,7 @@ COPY --from=builder /usr/src/app/migrations /usr/local/bin/migrations
 
 # Run migration
 RUN cargo sqlx migrate add create_tables
-RUN cargi sqkx migrate run
+RUN cargo sqkx migrate run
 
 # Make it executable
 RUN chmod +x ./crud-hz-api
