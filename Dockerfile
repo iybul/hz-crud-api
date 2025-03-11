@@ -6,20 +6,22 @@ RUN apt-get update && apt-get install -y musl-tools
 RUN rustup target add aarch64-unknown-linux-musl
 
 WORKDIR /usr/src/app
-COPY . .
 
-# Add the offline feature to your sqlx dependency in Cargo.toml
-# This should be done before building
-RUN sed -i 's/sqlx = { version = "[^"]*", features = \["postgres", "runtime-tokio-rustls"\]/sqlx = { version = "\0", features = ["postgres", "runtime-tokio-rustls", "offline", "migrate"]/g' Cargo.toml
+# Copy Cargo files first for better caching
+COPY Cargo.toml Cargo.lock ./
 
-# Set the DATABASE_URL environment variable for the build
-ENV DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
+# Create a dummy src/main.rs to build dependencies
+RUN mkdir -p src && \
+    echo "fn main() {println!(\"placeholder\")}" > src/main.rs && \
+    cargo build --release --target aarch64-unknown-linux-musl && \
+    rm -rf src
+
+# Copy actual code and migrations
+COPY src/ src/
+COPY migrations/ migrations/
 
 # Install sqlx-cli
 RUN cargo install sqlx-cli --no-default-features --features postgres
-
-# Generate sqlx-data.json file or copy one if you've pre-generated it
-COPY /.sqlx/ .
 
 # Build the application
 RUN cargo build --release --target aarch64-unknown-linux-musl
@@ -28,14 +30,18 @@ RUN cargo build --release --target aarch64-unknown-linux-musl
 FROM alpine:latest
 
 WORKDIR /usr/local/bin
+
 # Copy the statically-linked binary from the builder stage 
 COPY --from=builder /usr/src/app/target/aarch64-unknown-linux-musl/release/crud-hz-api .
+
+# Copy migrations folder to the final image
+COPY --from=builder /usr/src/app/migrations /usr/local/bin/migrations
 
 # Make it executable
 RUN chmod +x ./crud-hz-api
 
 # Set the DATABASE_URL for runtime
-ENV DATABASE_URL=postgres://postgres:postgres@postgresdb:5432/postgres
+ENV DATABASE_URL=postgres://postgres:postgres@db:5432/postgres
 
 # Command to run the application
 CMD ["./crud-hz-api"]

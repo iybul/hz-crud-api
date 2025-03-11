@@ -1,7 +1,7 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use dotenv::dotenv;
 use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgPoolOptions, Pool, Postgres, migrate};
+use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
 //use postgres::{ Client, NoTls };
 //use postgres::Error as PostgresError;
 //use std::net::{ TcpListener, TcpStream };
@@ -178,66 +178,66 @@ async fn delete_organization(
     }
 }
 
-// Initialize database tables
-async fn init_database(pool: &Pool<Postgres>) -> Result<(), sqlx::Error> {
-    sqlx::query!(
-        "CREATE TABLE IF NOT EXISTS organizations (
-            id SERIAL PRIMARY KEY,
-            name VARCHAR NOT NULL,
-            email VARCHAR NOT NULL
-        )"
-    )
-    .execute(pool)
-    .await?;
+// // Initialize database tables
+// async fn init_database(pool: &Pool<Postgres>) -> Result<(), sqlx::Error> {
+//     sqlx::query!(
+//         "CREATE TABLE IF NOT EXISTS organizations (
+//             id SERIAL PRIMARY KEY,
+//             name VARCHAR NOT NULL,
+//             email VARCHAR NOT NULL
+//         )"
+//     )
+//     .execute(pool)
+//     .await?;
 
-    sqlx::query!(
-        "CREATE TABLE IF NOT EXISTS employees (
-            id SERIAL PRIMARY KEY,
-            name VARCHAR NOT NULL,
-            role VARCHAR NOT NULL,
-            org_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE
-        )"
-    )
-    .execute(pool)
-    .await?;
+//     sqlx::query!(
+//         "CREATE TABLE IF NOT EXISTS employees (
+//             id SERIAL PRIMARY KEY,
+//             name VARCHAR NOT NULL,
+//             role VARCHAR NOT NULL,
+//             org_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE
+//         )"
+//     )
+//     .execute(pool)
+//     .await?;
 
-    sqlx::query!(
-        "CREATE TABLE IF NOT EXISTS ingredients (
-            id SERIAL PRIMARY KEY,
-            lotcode VARCHAR NOT NULL,
-            name VARCHAR NOT NULL,
-            date DATE NOT NULL,
-            org_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE
-        )"
-    )
-    .execute(pool)
-    .await?;
+//     sqlx::query!(
+//         "CREATE TABLE IF NOT EXISTS ingredients (
+//             id SERIAL PRIMARY KEY,
+//             lotcode VARCHAR NOT NULL,
+//             name VARCHAR NOT NULL,
+//             date DATE NOT NULL,
+//             org_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE
+//         )"
+//     )
+//     .execute(pool)
+//     .await?;
 
-    sqlx::query!(
-        "CREATE TABLE IF NOT EXISTS recipes (
-            id SERIAL PRIMARY KEY,
-            lotcode VARCHAR NOT NULL,
-            name VARCHAR NOT NULL,
-            date_made DATE NOT NULL,
-            org_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE,
-            description TEXT
-        )"
-    )
-    .execute(pool)
-    .await?;
+//     sqlx::query!(
+//         "CREATE TABLE IF NOT EXISTS recipes (
+//             id SERIAL PRIMARY KEY,
+//             lotcode VARCHAR NOT NULL,
+//             name VARCHAR NOT NULL,
+//             date_made DATE NOT NULL,
+//             org_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE,
+//             description TEXT
+//         )"
+//     )
+//     .execute(pool)
+//     .await?;
 
-    sqlx::query!(
-        "CREATE TABLE IF NOT EXISTS recipe_ingredients (
-            recipe_id INTEGER REFERENCES recipes(id) ON DELETE CASCADE,
-            ingredient_id INTEGER REFERENCES ingredients(id) ON DELETE CASCADE,
-            PRIMARY KEY (recipe_id, ingredient_id)
-        )"
-    )
-    .execute(pool)
-    .await?;
+//     sqlx::query!(
+//         "CREATE TABLE IF NOT EXISTS recipe_ingredients (
+//             recipe_id INTEGER REFERENCES recipes(id) ON DELETE CASCADE,
+//             ingredient_id INTEGER REFERENCES ingredients(id) ON DELETE CASCADE,
+//             PRIMARY KEY (recipe_id, ingredient_id)
+//         )"
+//     )
+//     .execute(pool)
+//     .await?;
 
-    Ok(())
-}
+//     Ok(())
+// }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -265,10 +265,10 @@ async fn main() -> std::io::Result<()> {
     
     
     // Initialize database tables
-    if let Err(e) = init_database(&db_pool).await {
-        eprintln!("Error setting up database: {}", e);
-        std::process::exit(1);
-    }
+    // if let Err(e) = init_database(&db_pool).await {
+    //     eprintln!("Error setting up database: {}", e);
+    //     std::process::exit(1);
+    // }
         
     // Start HTTP server
     HttpServer::new(move || {

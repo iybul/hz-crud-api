@@ -55,7 +55,7 @@ This may require
 Run:
 
 ```
-docker-compose up postgresdb -d`
+docker-compose up db -d
 export DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres
 cargo sqlx prepare
 ```
