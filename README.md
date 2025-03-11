@@ -35,7 +35,9 @@ Get one: GET to /api/orgs/{id}
 Update: PUT to /api/orgs/{id}
 Delete: DELETE to /api/orgs/{id}
 
+### Schema control
 
+SQLx-Migrate in the `Migrations/` Folder
 
 Note: Employee, recipe, and ingredient endpoints are mentioned in comments but not fully implemented in this code.
 
