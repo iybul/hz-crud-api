@@ -1,14 +1,14 @@
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
 use dotenv::dotenv;
 use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
-use postgres::{ Client, NoTls };
-use postgres::Error as PostgresError;
-use std::net::{ TcpListener, TcpStream };
-use std::io::{ Read, Write };
+use sqlx::{postgres::PgPoolOptions, Pool, Postgres, migrate};
+//use postgres::{ Client, NoTls };
+//use postgres::Error as PostgresError;
+//use std::net::{ TcpListener, TcpStream };
+//use std::io::{ Read, Write };
 use std::env;
 
-#[macro_use]
+//#[macro_use]
 extern crate serde_derive;
 
 // Organization entity (renamed from User)
