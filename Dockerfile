@@ -32,7 +32,8 @@ COPY --from=builder /usr/src/app/target/aarch64-unknown-linux-musl/release/crud-
 COPY --from=builder /usr/src/app/migrations /usr/local/bin/migrations
 
 # Run migration
-RUN sqlx migrate add create_tables
+RUN cargo sqlx migrate add create_tables
+RUN cargi sqkx migrate run
 
 # Make it executable
 RUN chmod +x ./crud-hz-api
