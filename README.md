@@ -41,6 +41,9 @@ SQLx-Migrate in the `Migrations/` Folder
 
 Note: Employee, recipe, and ingredient endpoints are mentioned in comments but not fully implemented in this code.
 
+
+![komiRust](mdRust.png)
+
 ## To run locally
 
 Make sure you have **Docker** installed 
