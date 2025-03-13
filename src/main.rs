@@ -29,7 +29,7 @@ struct Recipe {
     id: Option<i32>,
     lotcode: String,
     name: String,
-    date_made: String,  // Consider using chrono::NaiveDate
+    date_made: String,  
     org_id: i32,
     ingredients: Vec<i32>,  // List of ingredient IDs
     description: String,
@@ -40,7 +40,7 @@ struct Ingredient {
     id: Option<i32>,
     lotcode: String,
     name: String,
-    date: String,  // Consider using chrono::NaiveDate
+    date: String,  
     org_id: i32,
 }
 

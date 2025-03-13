@@ -8,7 +8,7 @@ use argon2::{
     },
     Argon2
 };
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey};
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Postgres};
@@ -187,7 +187,7 @@ pub async fn register_organization(
                         "#,
                         token,
                         record.id,
-                        expires_at
+                        expires_at.naive_utc() // Convert DateTime<Utc> to NaiveDateTime
                     )
                     .execute(&data.db_pool)
                     .await
@@ -264,7 +264,7 @@ pub async fn login_organization(
                             "#,
                             token,
                             record.id,
-                            expires_at
+                            expires_at.naive_utc() // Convert DateTime<Utc> to NaiveDateTime
                         )
                         .execute(&data.db_pool)
                         .await
