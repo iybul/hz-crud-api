@@ -1,17 +1,14 @@
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{web, App, HttpResponse, HttpServer, Responder, middleware::Logger};
+use actix_cors::Cors;
 use dotenv::dotenv;
 use serde::{Deserialize, Serialize};
 use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
-//use postgres::{ Client, NoTls };
-//use postgres::Error as PostgresError;
-//use std::net::{ TcpListener, TcpStream };
-//use std::io::{ Read, Write };
 use std::env;
 
-//#[macro_use]
-extern crate serde_derive;
+// Import auth module
+mod auth;
 
-// Organization entity (renamed from User)
+// Organization entity
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Organization {
     pub id: Option<i32>,
@@ -48,7 +45,7 @@ struct Ingredient {
 }
 
 // Application state
-struct AppState {
+pub struct AppState {
     db_pool: Pool<Postgres>,
 }
 
@@ -111,7 +108,6 @@ async fn get_organization(
 async fn get_all_organizations(
     data: web::Data<AppState>,
 ) -> impl Responder {
-    //TODO: REMOVE QUERY UNCHECKED SO THAT THE QUERYS ARENOT CHECKED AT RUNTIME
     match sqlx::query_as!(
         Organization,
         "SELECT id, name, email FROM organizations"
@@ -178,67 +174,6 @@ async fn delete_organization(
     }
 }
 
-// // Initialize database tables
-// async fn init_database(pool: &Pool<Postgres>) -> Result<(), sqlx::Error> {
-//     sqlx::query!(
-//         "CREATE TABLE IF NOT EXISTS organizations (
-//             id SERIAL PRIMARY KEY,
-//             name VARCHAR NOT NULL,
-//             email VARCHAR NOT NULL
-//         )"
-//     )
-//     .execute(pool)
-//     .await?;
-
-//     sqlx::query!(
-//         "CREATE TABLE IF NOT EXISTS employees (
-//             id SERIAL PRIMARY KEY,
-//             name VARCHAR NOT NULL,
-//             role VARCHAR NOT NULL,
-//             org_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE
-//         )"
-//     )
-//     .execute(pool)
-//     .await?;
-
-//     sqlx::query!(
-//         "CREATE TABLE IF NOT EXISTS ingredients (
-//             id SERIAL PRIMARY KEY,
-//             lotcode VARCHAR NOT NULL,
-//             name VARCHAR NOT NULL,
-//             date DATE NOT NULL,
-//             org_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE
-//         )"
-//     )
-//     .execute(pool)
-//     .await?;
-
-//     sqlx::query!(
-//         "CREATE TABLE IF NOT EXISTS recipes (
-//             id SERIAL PRIMARY KEY,
-//             lotcode VARCHAR NOT NULL,
-//             name VARCHAR NOT NULL,
-//             date_made DATE NOT NULL,
-//             org_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE,
-//             description TEXT
-//         )"
-//     )
-//     .execute(pool)
-//     .await?;
-
-//     sqlx::query!(
-//         "CREATE TABLE IF NOT EXISTS recipe_ingredients (
-//             recipe_id INTEGER REFERENCES recipes(id) ON DELETE CASCADE,
-//             ingredient_id INTEGER REFERENCES ingredients(id) ON DELETE CASCADE,
-//             PRIMARY KEY (recipe_id, ingredient_id)
-//         )"
-//     )
-//     .execute(pool)
-//     .await?;
-
-//     Ok(())
-// }
-
 // Configure app with database pool
 pub fn configure_app(config: &mut web::ServiceConfig, db_pool: Pool<Postgres>) {
     config
@@ -248,6 +183,14 @@ pub fn configure_app(config: &mut web::ServiceConfig, db_pool: Pool<Postgres>) {
         .route("/health", web::get().to(health_check))
         .service(
             web::scope("/api")
+                // Authentication endpoints
+                .service(
+                    web::scope("/auth")
+                        .route("/register", web::post().to(auth::register_organization))
+                        .route("/login", web::post().to(auth::login_organization))
+                        .route("/logout", web::post().to(auth::logout_organization))
+                )
+                // Organization endpoints
                 .service(
                     web::scope("/orgs")
                         .route("", web::post().to(create_organization))
@@ -270,7 +213,7 @@ async fn main() -> std::io::Result<()> {
     
     // Set up database connection pool
     let database_url = env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@db:5432/postgres".to_string());
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/postgres".to_string());
         
     let db_pool = PgPoolOptions::new()
         .max_connections(5)
@@ -278,19 +221,36 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to create database connection pool");
     
-    // Run migrations instead of init_database
+    // Run migrations
     sqlx::migrate!("./migrations")
         .run(&db_pool)
         .await
         .expect("Failed to run database migrations");
     
+    let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let server_url = format!("{}:{}", host, port);
+    
+    println!("Starting server at http://{}", server_url);
+    
     // Start HTTP server
     HttpServer::new(move || {
-        App::new().configure(|config| {
-            configure_app(config, db_pool.clone());
-        })
+        // Configure CORS
+        let cors = Cors::default()
+            .allow_any_origin()  // In production, limit this to your frontend origin
+            .allow_any_method()
+            .allow_any_header()
+            .supports_credentials()
+            .max_age(3600);
+        
+        App::new()
+            .wrap(Logger::default())
+            .wrap(cors)
+            .configure(|config| {
+                configure_app(config, db_pool.clone());
+            })
     })
-    .bind("0.0.0.0:8080")?
+    .bind(server_url)?
     .run()
     .await
 }
