@@ -17,6 +17,33 @@ pub struct Organization {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+struct BatchInput {
+    pub org_id: i32,
+    pub employee: String,
+    pub recipe_lotcode: String,
+    #[serde(alias = "batchLotCode")]
+    pub batch_lot_code: String,
+    pub ingredients: Vec<i32>,
+    pub amount_ingredients: Vec<i32>,
+    pub date_made: String,
+    pub amount_made: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Batch {
+    pub id: Option<i32>,
+    pub org_id: i32,
+    pub employee: String,
+    pub recipe_lotcode: String,
+    #[serde(alias = "batchLotCode")]
+    pub batch_lot_code: String,
+    pub ingredients: Vec<i32>,
+    pub amount_ingredients: Vec<i32>,
+    pub date_made: String,
+    pub amount_made: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 struct Employee {
     pub id: Option<i32>,
     pub name: String,
@@ -794,6 +821,382 @@ async fn delete_recipe(
     }
 }
 
+// Batch endpoints
+async fn create_batch(
+    batch: web::Json<BatchInput>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    // Parse the date string to NaiveDate
+    let date_made = match NaiveDate::parse_from_str(&batch.date_made, "%Y-%m-%d") {
+        Ok(date) => date,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid date format. Use YYYY-MM-DD"
+            }));
+        }
+    };
+
+    // Validate ingredients and amounts have the same length
+    if batch.ingredients.len() != batch.amount_ingredients.len() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Ingredients and amounts must have the same length"
+        }));
+    }
+
+    // Start a transaction
+    let mut tx = match data.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            eprintln!("Failed to start transaction: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+        }
+    };
+
+    // Insert the batch
+    let batch_id = match sqlx::query!(
+        "INSERT INTO batches (org_id, employee, recipe_lotcode, batch_lot_code, date_made, amount_made) 
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        batch.org_id,
+        batch.employee,
+        batch.recipe_lotcode,
+        batch.batch_lot_code,
+        date_made,
+        batch.amount_made
+    )
+    .fetch_one(&mut *tx)
+    .await
+    {
+        Ok(record) => record.id,
+        Err(e) => {
+            eprintln!("Failed to create batch: {}", e);
+            let _ = tx.rollback().await;
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to create batch"}));
+        }
+    };
+
+    // Insert batch-ingredient relationships with amounts
+    for (index, ingredient_id) in batch.ingredients.iter().enumerate() {
+        if let Err(e) = sqlx::query!(
+            "INSERT INTO batch_ingredients (batch_id, ingredient_id, amount) VALUES ($1, $2, $3)",
+            batch_id,
+            ingredient_id,
+            batch.amount_ingredients[index]
+        )
+        .execute(&mut *tx)
+        .await
+        {
+            eprintln!("Failed to link ingredient to batch: {}", e);
+            let _ = tx.rollback().await;
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to create batch"}));
+        }
+    }
+
+    // Commit the transaction
+    if let Err(e) = tx.commit().await {
+        eprintln!("Failed to commit transaction: {}", e);
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+    }
+
+    // Return the created batch
+    let created_batch = Batch {
+        id: Some(batch_id),
+        org_id: batch.org_id,
+        employee: batch.employee.clone(),
+        recipe_lotcode: batch.recipe_lotcode.clone(),
+        batch_lot_code: batch.batch_lot_code.clone(),
+        ingredients: batch.ingredients.clone(),
+        amount_ingredients: batch.amount_ingredients.clone(),
+        date_made: batch.date_made.clone(),
+        amount_made: batch.amount_made.clone(),
+    };
+
+    HttpResponse::Created().json(created_batch)
+}
+
+async fn get_batch(
+    path: web::Path<i32>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let id = path.into_inner();
+    
+    // Get the basic batch information
+    let batch_record = match sqlx::query!(
+        "SELECT id, org_id, employee, recipe_lotcode, batch_lot_code, date_made::text as date_made, amount_made 
+         FROM batches WHERE id = $1",
+        id
+    )
+    .fetch_optional(&data.db_pool)
+    .await
+    {
+        Ok(Some(record)) => record,
+        Ok(None) => return HttpResponse::NotFound().json(serde_json::json!({"error": "Batch not found"})),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+        }
+    };
+
+    // Get the batch ingredients with amounts
+    let batch_ingredients = match sqlx::query!(
+        "SELECT bi.ingredient_id, bi.amount 
+         FROM batch_ingredients bi 
+         WHERE bi.batch_id = $1",
+        id
+    )
+    .fetch_all(&data.db_pool)
+    .await
+    {
+        Ok(records) => records,
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+        }
+    };
+
+    // Extract ingredient ids and amounts
+    let ingredients: Vec<i32> = batch_ingredients.iter().map(|r| r.ingredient_id).collect();
+    let amount_ingredients: Vec<i32> = batch_ingredients.iter().map(|r| r.amount).collect();
+
+    // Create the complete batch object
+    let batch = Batch {
+        id: Some(batch_record.id),
+        org_id: batch_record.org_id.unwrap_or(0),
+        employee: batch_record.employee,
+        recipe_lotcode: batch_record.recipe_lotcode,
+        batch_lot_code: batch_record.batch_lot_code,
+        ingredients,
+        amount_ingredients,
+        date_made: batch_record.date_made.unwrap_or_default(),
+        amount_made: batch_record.amount_made,
+    };
+
+    HttpResponse::Ok().json(batch)
+}
+
+async fn get_all_batches(
+    data: web::Data<AppState>,
+) -> impl Responder {
+    // Get all batches
+    let batch_records = match sqlx::query!(
+        "SELECT id, org_id, employee, recipe_lotcode, batch_lot_code, date_made::text as date_made, amount_made 
+         FROM batches ORDER BY id DESC"
+    )
+    .fetch_all(&data.db_pool)
+    .await
+    {
+        Ok(records) => records,
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+        }
+    };
+
+    // Create a vector to hold all batches
+    let mut batches = Vec::new();
+
+    // For each batch, get its ingredients and amounts
+    for record in batch_records {
+        let batch_id = record.id;
+
+        // Get the batch ingredients with amounts
+        let batch_ingredients = match sqlx::query!(
+            "SELECT bi.ingredient_id, bi.amount 
+             FROM batch_ingredients bi 
+             WHERE bi.batch_id = $1",
+            batch_id
+        )
+        .fetch_all(&data.db_pool)
+        .await
+        {
+            Ok(records) => records,
+            Err(e) => {
+                eprintln!("Database error when fetching ingredients for batch {}: {}", batch_id, e);
+                continue; // Skip this batch if we can't get its ingredients
+            }
+        };
+
+        // Extract ingredient ids and amounts
+        let ingredients: Vec<i32> = batch_ingredients.iter().map(|r| r.ingredient_id).collect();
+        let amount_ingredients: Vec<i32> = batch_ingredients.iter().map(|r| r.amount).collect();
+
+        // Create the complete batch object
+        let batch = Batch {
+            id: Some(record.id),
+            org_id: record.org_id.unwrap_or(0),
+            employee: record.employee,
+            recipe_lotcode: record.recipe_lotcode,
+            batch_lot_code: record.batch_lot_code,
+            ingredients,
+            amount_ingredients,
+            date_made: record.date_made.unwrap_or_default(),
+            amount_made: record.amount_made,
+        };
+
+        batches.push(batch);
+    }
+
+    HttpResponse::Ok().json(batches)
+}
+
+async fn update_batch(
+    path: web::Path<i32>,
+    batch: web::Json<BatchInput>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let id = path.into_inner();
+    
+    // Parse the date string to NaiveDate
+    let date_made = match NaiveDate::parse_from_str(&batch.date_made, "%Y-%m-%d") {
+        Ok(date) => date,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid date format. Use YYYY-MM-DD"
+            }));
+        }
+    };
+
+    // Validate ingredients and amounts have the same length
+    if batch.ingredients.len() != batch.amount_ingredients.len() {
+        return HttpResponse::BadRequest().json(serde_json::json!({
+            "error": "Ingredients and amounts must have the same length"
+        }));
+    }
+
+    // Start a transaction
+    let mut tx = match data.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            eprintln!("Failed to start transaction: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+        }
+    };
+
+    // Update the batch
+    let update_result = sqlx::query!(
+        "UPDATE batches SET org_id = $1, employee = $2, recipe_lotcode = $3, batch_lot_code = $4, 
+         date_made = $5, amount_made = $6 WHERE id = $7 RETURNING id",
+        batch.org_id,
+        batch.employee,
+        batch.recipe_lotcode,
+        batch.batch_lot_code,
+        date_made,
+        batch.amount_made,
+        id
+    )
+    .fetch_optional(&mut *tx)
+    .await;
+
+    match update_result {
+        Ok(Some(_)) => {
+            // Delete existing batch-ingredient relationships
+            if let Err(e) = sqlx::query!("DELETE FROM batch_ingredients WHERE batch_id = $1", id)
+                .execute(&mut *tx)
+                .await
+            {
+                eprintln!("Failed to delete ingredient relations: {}", e);
+                let _ = tx.rollback().await;
+                return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to update batch"}));
+            }
+
+            // Insert new batch-ingredient relationships with amounts
+            for (index, ingredient_id) in batch.ingredients.iter().enumerate() {
+                if let Err(e) = sqlx::query!(
+                    "INSERT INTO batch_ingredients (batch_id, ingredient_id, amount) VALUES ($1, $2, $3)",
+                    id,
+                    ingredient_id,
+                    batch.amount_ingredients[index]
+                )
+                .execute(&mut *tx)
+                .await
+                {
+                    eprintln!("Failed to link ingredient to batch: {}", e);
+                    let _ = tx.rollback().await;
+                    return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to update batch"}));
+                }
+            }
+
+            // Commit the transaction
+            if let Err(e) = tx.commit().await {
+                eprintln!("Failed to commit transaction: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+            }
+
+            // Return the updated batch
+            let updated_batch = Batch {
+                id: Some(id),
+                org_id: batch.org_id,
+                employee: batch.employee.clone(),
+                recipe_lotcode: batch.recipe_lotcode.clone(),
+                batch_lot_code: batch.batch_lot_code.clone(),
+                ingredients: batch.ingredients.clone(),
+                amount_ingredients: batch.amount_ingredients.clone(),
+                date_made: batch.date_made.clone(),
+                amount_made: batch.amount_made.clone(),
+            };
+            HttpResponse::Ok().json(updated_batch)
+        },
+        Ok(None) => {
+            let _ = tx.rollback().await;
+            HttpResponse::NotFound().json(serde_json::json!({"error": "Batch not found"}))
+        },
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            let _ = tx.rollback().await;
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
+        }
+    }
+}
+
+async fn delete_batch(
+    path: web::Path<i32>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let id = path.into_inner();
+    
+    // Start a transaction
+    let mut tx = match data.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            eprintln!("Failed to start transaction: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+        }
+    };
+
+    // Delete batch-ingredient relationships first
+    if let Err(e) = sqlx::query!("DELETE FROM batch_ingredients WHERE batch_id = $1", id)
+        .execute(&mut *tx)
+        .await
+    {
+        eprintln!("Failed to delete ingredient relations: {}", e);
+        let _ = tx.rollback().await;
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to delete batch"}));
+    }
+
+    // Delete the batch
+    match sqlx::query!("DELETE FROM batches WHERE id = $1 RETURNING id", id)
+        .fetch_optional(&mut *tx)
+        .await
+    {
+        Ok(Some(_)) => {
+            // Commit the transaction
+            if let Err(e) = tx.commit().await {
+                eprintln!("Failed to commit transaction: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+            }
+            HttpResponse::NoContent().finish()
+        },
+        Ok(None) => {
+            let _ = tx.rollback().await;
+            HttpResponse::NotFound().json(serde_json::json!({"error": "Batch not found"}))
+        },
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            let _ = tx.rollback().await;
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
+        }
+    }
+}
+
 // Configure app with database pool
 pub fn configure_app(config: &mut web::ServiceConfig, db_pool: Pool<Postgres>) {
     config
@@ -845,6 +1248,15 @@ pub fn configure_app(config: &mut web::ServiceConfig, db_pool: Pool<Postgres>) {
                         .route("/{id}", web::get().to(get_ingredient))
                         .route("/{id}", web::put().to(update_ingredient))
                         .route("/{id}", web::delete().to(delete_ingredient))
+                )
+                // Batch endpoints
+                .service(
+                    web::scope("/batches")
+                        .route("", web::post().to(create_batch))
+                        .route("", web::get().to(get_all_batches))
+                        .route("/{id}", web::get().to(get_batch))
+                        .route("/{id}", web::put().to(update_batch))
+                        .route("/{id}", web::delete().to(delete_batch))
                 )
         );
 }
