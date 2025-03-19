@@ -16,6 +16,46 @@ pub struct Organization {
     pub email: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ProblemLog {
+    pub id: Option<i32>,
+    #[serde(alias = "isOpen")]
+    pub is_open: bool,
+    #[serde(alias = "dateOpened")]
+    pub date_opened: String,
+    #[serde(alias = "customerName")]
+    pub customer_name: String,
+    #[serde(alias = "problemType")]
+    pub problem_type: String,
+    #[serde(alias = "assignedTo")]
+    pub assigned_to: Vec<i32>,
+    #[serde(alias = "problemDescription")]
+    pub problem_description: String,
+    pub recall: bool,
+    #[serde(alias = "dateResolved")]
+    pub date_resolved: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ProblemLogInput {
+    #[serde(alias = "isOpen")]
+    pub is_open: bool,
+    #[serde(alias = "dateOpened")]
+    pub date_opened: String,
+    #[serde(alias = "customerName")]
+    pub customer_name: String,
+    #[serde(alias = "problemType")]
+    pub problem_type: String,
+    #[serde(alias = "assignedTo")]
+    pub assigned_to: Vec<i32>,
+    #[serde(alias = "problemDescription")]
+    pub problem_description: String,
+    pub recall: bool,
+    #[serde(alias = "dateResolved")]
+    pub date_resolved: Option<String>,
+}
+
+
 #[derive(Serialize, Deserialize, Debug)]
 struct BatchInput {
     pub org_id: i32,
@@ -1197,6 +1237,386 @@ async fn delete_batch(
     }
 }
 
+// Problem Log endpoints
+async fn create_problem_log(
+    problem_log: web::Json<ProblemLogInput>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    // Parse date_opened string to NaiveDate
+    let date_opened = match NaiveDate::parse_from_str(&problem_log.date_opened, "%Y-%m-%d") {
+        Ok(date) => date,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid date_opened format. Use YYYY-MM-DD"
+            }));
+        }
+    };
+
+    // Parse date_resolved string to NaiveDate if it exists
+    let date_resolved = match &problem_log.date_resolved {
+        Some(date_str) => {
+            match NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                Ok(date) => Some(date),
+                Err(_) => {
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": "Invalid date_resolved format. Use YYYY-MM-DD"
+                    }));
+                }
+            }
+        },
+        None => None
+    };
+
+    // Start a transaction
+    let mut tx = match data.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            eprintln!("Failed to start transaction: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+        }
+    };
+
+    // Insert the problem log
+    let problem_log_id = match sqlx::query!(
+        "INSERT INTO problem_logs (is_open, date_opened, customer_name, problem_type, problem_description, recall, date_resolved) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+        problem_log.is_open,
+        date_opened,
+        problem_log.customer_name,
+        problem_log.problem_type,
+        problem_log.problem_description,
+        problem_log.recall,
+        date_resolved
+    )
+    .fetch_one(&mut *tx)
+    .await
+    {
+        Ok(record) => record.id,
+        Err(e) => {
+            eprintln!("Failed to create problem log: {}", e);
+            let _ = tx.rollback().await;
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to create problem log"}));
+        }
+    };
+
+    // Insert problem log-employee relationships
+    for employee_id in &problem_log.assigned_to {
+        if let Err(e) = sqlx::query!(
+            "INSERT INTO problem_logs_employees (problem_log_id, employee_id) VALUES ($1, $2)",
+            problem_log_id,
+            employee_id
+        )
+        .execute(&mut *tx)
+        .await
+        {
+            eprintln!("Failed to link employee to problem log: {}", e);
+            let _ = tx.rollback().await;
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to create problem log"}));
+        }
+    }
+
+    // Commit the transaction
+    if let Err(e) = tx.commit().await {
+        eprintln!("Failed to commit transaction: {}", e);
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+    }
+
+    // Return the created problem log
+    let created_problem_log = ProblemLog {
+        id: Some(problem_log_id),
+        is_open: problem_log.is_open,
+        date_opened: problem_log.date_opened.clone(),
+        customer_name: problem_log.customer_name.clone(),
+        problem_type: problem_log.problem_type.clone(),
+        assigned_to: problem_log.assigned_to.clone(),
+        problem_description: problem_log.problem_description.clone(),
+        recall: problem_log.recall,
+        date_resolved: problem_log.date_resolved.clone(),
+    };
+
+    HttpResponse::Created().json(created_problem_log)
+}
+
+async fn get_problem_log(
+    path: web::Path<i32>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let id = path.into_inner();
+    
+    // Get the problem log
+    let problem_log_record = match sqlx::query!(
+        "SELECT id, is_open, date_opened::text as date_opened, customer_name, problem_type, problem_description, 
+         recall, date_resolved::text as date_resolved FROM problem_logs WHERE id = $1",
+        id
+    )
+    .fetch_optional(&data.db_pool)
+    .await
+    {
+        Ok(Some(record)) => record,
+        Ok(None) => return HttpResponse::NotFound().json(serde_json::json!({"error": "Problem log not found"})),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+        }
+    };
+
+    // Get the assigned employees
+    let assigned_employees = match sqlx::query!(
+        "SELECT employee_id FROM problem_logs_employees WHERE problem_log_id = $1",
+        id
+    )
+    .fetch_all(&data.db_pool)
+    .await
+    {
+        Ok(records) => records.into_iter().map(|r| r.employee_id).collect(),
+        Err(e) => {
+            eprintln!("Database error when fetching assigned employees: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+        }
+    };
+
+    // Create the complete problem log object
+    let problem_log = ProblemLog {
+        id: Some(problem_log_record.id),
+        is_open: problem_log_record.is_open,
+        date_opened: problem_log_record.date_opened.unwrap_or_default(),
+        customer_name: problem_log_record.customer_name,
+        problem_type: problem_log_record.problem_type,
+        assigned_to: assigned_employees,
+        problem_description: problem_log_record.problem_description,
+        recall: problem_log_record.recall,
+        date_resolved: problem_log_record.date_resolved,
+    };
+
+    HttpResponse::Ok().json(problem_log)
+}
+
+async fn get_all_problem_logs(
+    data: web::Data<AppState>,
+) -> impl Responder {
+    // Get all problem logs
+    let problem_log_records = match sqlx::query!(
+        "SELECT id, is_open, date_opened::text as date_opened, customer_name, problem_type, problem_description, 
+         recall, date_resolved::text as date_resolved FROM problem_logs ORDER BY id DESC"
+    )
+    .fetch_all(&data.db_pool)
+    .await
+    {
+        Ok(records) => records,
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+        }
+    };
+
+    // Create a vector to hold all problem logs
+    let mut problem_logs = Vec::new();
+
+    // For each problem log, get its assigned employees
+    for record in problem_log_records {
+        let problem_log_id = record.id;
+
+        // Get the assigned employees
+        let assigned_employees = match sqlx::query!(
+            "SELECT employee_id FROM problem_logs_employees WHERE problem_log_id = $1",
+            problem_log_id
+        )
+        .fetch_all(&data.db_pool)
+        .await
+        {
+            Ok(records) => records.into_iter().map(|r| r.employee_id).collect(),
+            Err(e) => {
+                eprintln!("Database error when fetching assigned employees for problem log {}: {}", problem_log_id, e);
+                continue; // Skip this problem log if we can't get its assigned employees
+            }
+        };
+
+        // Create the complete problem log object
+        let problem_log = ProblemLog {
+            id: Some(record.id),
+            is_open: record.is_open,
+            date_opened: record.date_opened.unwrap_or_default(),
+            customer_name: record.customer_name,
+            problem_type: record.problem_type,
+            assigned_to: assigned_employees,
+            problem_description: record.problem_description,
+            recall: record.recall,
+            date_resolved: record.date_resolved,
+        };
+
+        problem_logs.push(problem_log);
+    }
+
+    HttpResponse::Ok().json(problem_logs)
+}
+
+async fn update_problem_log(
+    path: web::Path<i32>,
+    problem_log: web::Json<ProblemLogInput>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let id = path.into_inner();
+    
+    // Parse date_opened string to NaiveDate
+    let date_opened = match NaiveDate::parse_from_str(&problem_log.date_opened, "%Y-%m-%d") {
+        Ok(date) => date,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid date_opened format. Use YYYY-MM-DD"
+            }));
+        }
+    };
+
+    // Parse date_resolved string to NaiveDate if it exists
+    let date_resolved = match &problem_log.date_resolved {
+        Some(date_str) => {
+            match NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                Ok(date) => Some(date),
+                Err(_) => {
+                    return HttpResponse::BadRequest().json(serde_json::json!({
+                        "error": "Invalid date_resolved format. Use YYYY-MM-DD"
+                    }));
+                }
+            }
+        },
+        None => None
+    };
+
+    // Start a transaction
+    let mut tx = match data.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            eprintln!("Failed to start transaction: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+        }
+    };
+
+    // Update the problem log
+    let update_result = sqlx::query!(
+        "UPDATE problem_logs SET is_open = $1, date_opened = $2, customer_name = $3, problem_type = $4, 
+         problem_description = $5, recall = $6, date_resolved = $7 WHERE id = $8 RETURNING id",
+        problem_log.is_open,
+        date_opened,
+        problem_log.customer_name,
+        problem_log.problem_type,
+        problem_log.problem_description,
+        problem_log.recall,
+        date_resolved,
+        id
+    )
+    .fetch_optional(&mut *tx)
+    .await;
+
+    match update_result {
+        Ok(Some(_)) => {
+            // Delete existing problem log-employee relationships
+            if let Err(e) = sqlx::query!("DELETE FROM problem_logs_employees WHERE problem_log_id = $1", id)
+                .execute(&mut *tx)
+                .await
+            {
+                eprintln!("Failed to delete employee relations: {}", e);
+                let _ = tx.rollback().await;
+                return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to update problem log"}));
+            }
+
+            // Insert new problem log-employee relationships
+            for employee_id in &problem_log.assigned_to {
+                if let Err(e) = sqlx::query!(
+                    "INSERT INTO problem_logs_employees (problem_log_id, employee_id) VALUES ($1, $2)",
+                    id,
+                    employee_id
+                )
+                .execute(&mut *tx)
+                .await
+                {
+                    eprintln!("Failed to link employee to problem log: {}", e);
+                    let _ = tx.rollback().await;
+                    return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to update problem log"}));
+                }
+            }
+
+            // Commit the transaction
+            if let Err(e) = tx.commit().await {
+                eprintln!("Failed to commit transaction: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+            }
+
+            // Return the updated problem log
+            let updated_problem_log = ProblemLog {
+                id: Some(id),
+                is_open: problem_log.is_open,
+                date_opened: problem_log.date_opened.clone(),
+                customer_name: problem_log.customer_name.clone(),
+                problem_type: problem_log.problem_type.clone(),
+                assigned_to: problem_log.assigned_to.clone(),
+                problem_description: problem_log.problem_description.clone(),
+                recall: problem_log.recall,
+                date_resolved: problem_log.date_resolved.clone(),
+            };
+            HttpResponse::Ok().json(updated_problem_log)
+        },
+        Ok(None) => {
+            let _ = tx.rollback().await;
+            HttpResponse::NotFound().json(serde_json::json!({"error": "Problem log not found"}))
+        },
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            let _ = tx.rollback().await;
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
+        }
+    }
+}
+
+async fn delete_problem_log(
+    path: web::Path<i32>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let id = path.into_inner();
+    
+    // Start a transaction
+    let mut tx = match data.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            eprintln!("Failed to start transaction: {}", e);
+            return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+        }
+    };
+
+    // Delete problem log-employee relationships first
+    if let Err(e) = sqlx::query!("DELETE FROM problem_logs_employees WHERE problem_log_id = $1", id)
+        .execute(&mut *tx)
+        .await
+    {
+        eprintln!("Failed to delete employee relations: {}", e);
+        let _ = tx.rollback().await;
+        return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to delete problem log"}));
+    }
+
+    // Delete the problem log
+    match sqlx::query!("DELETE FROM problem_logs WHERE id = $1 RETURNING id", id)
+        .fetch_optional(&mut *tx)
+        .await
+    {
+        Ok(Some(_)) => {
+            // Commit the transaction
+            if let Err(e) = tx.commit().await {
+                eprintln!("Failed to commit transaction: {}", e);
+                return HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}));
+            }
+            HttpResponse::NoContent().finish()
+        },
+        Ok(None) => {
+            let _ = tx.rollback().await;
+            HttpResponse::NotFound().json(serde_json::json!({"error": "Problem log not found"}))
+        },
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            let _ = tx.rollback().await;
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
+        }
+    }
+}
+
 // Configure app with database pool
 pub fn configure_app(config: &mut web::ServiceConfig, db_pool: Pool<Postgres>) {
     config
@@ -1257,6 +1677,15 @@ pub fn configure_app(config: &mut web::ServiceConfig, db_pool: Pool<Postgres>) {
                         .route("/{id}", web::get().to(get_batch))
                         .route("/{id}", web::put().to(update_batch))
                         .route("/{id}", web::delete().to(delete_batch))
+                )
+                // Problem Log endpoints
+                .service(
+                    web::scope("/problemlogs")
+                        .route("", web::post().to(create_problem_log))
+                        .route("", web::get().to(get_all_problem_logs))
+                        .route("/{id}", web::get().to(get_problem_log))
+                        .route("/{id}", web::put().to(update_problem_log))
+                        .route("/{id}", web::delete().to(delete_problem_log))
                 )
         );
 }
