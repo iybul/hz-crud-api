@@ -129,6 +129,27 @@ struct Ingredient {
     pub org_id: i32,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct ReceivingLogInput {
+    pub lotcode: String,
+    pub company_name: String,
+    pub item_name: String,
+    pub temperature: String,
+    pub date: String, // For user input as string
+    pub org_id: i32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ReceivingLog {
+    pub id: Option<i32>,
+    pub lotcode: String,
+    pub company_name: String,
+    pub item_name: String,
+    pub temperature: String,
+    pub date: String,
+    pub org_id: i32,
+}
+
 // Application state
 pub struct AppState {
     db_pool: Pool<Postgres>,
@@ -558,6 +579,187 @@ async fn delete_ingredient(
     {
         Ok(Some(_)) => HttpResponse::NoContent().finish(),
         Ok(None) => HttpResponse::NotFound().json(serde_json::json!({"error": "Ingredient not found"})),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
+        }
+    }
+}
+
+// Receiving Log endpoints
+async fn create_receiving_log(
+    receiving_log: web::Json<ReceivingLogInput>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    // Parse the date string to NaiveDate
+    let date = match NaiveDate::parse_from_str(&receiving_log.date, "%Y-%m-%d") {
+        Ok(date) => date,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid date format. Use YYYY-MM-DD"
+            }));
+        }
+    };
+
+    match sqlx::query!(
+        "INSERT INTO receiving_log (lotcode, company_name, item_name, temperature, date, org_id) 
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+        receiving_log.lotcode,
+        receiving_log.company_name,
+        receiving_log.item_name,
+        receiving_log.temperature,
+        date,
+        receiving_log.org_id
+    )
+    .fetch_one(&data.db_pool)
+    .await
+    {
+        Ok(record) => {
+            let created_log = ReceivingLog {
+                id: Some(record.id),
+                lotcode: receiving_log.lotcode.clone(),
+                company_name: receiving_log.company_name.clone(),
+                item_name: receiving_log.item_name.clone(),
+                temperature: receiving_log.temperature.clone(),
+                date: receiving_log.date.clone(),
+                org_id: receiving_log.org_id,
+            };
+            HttpResponse::Created().json(created_log)
+        }
+        Err(e) => {
+            eprintln!("Failed to create receiving log: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to create receiving log"}))
+        }
+    }
+}
+
+async fn get_receiving_log(
+    path: web::Path<i32>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let id = path.into_inner();
+    
+    match sqlx::query!(
+        "SELECT id, lotcode, company_name, item_name, temperature, date::text as date, org_id 
+         FROM receiving_log WHERE id = $1",
+        id
+    )
+    .fetch_optional(&data.db_pool)
+    .await
+    {
+        Ok(Some(record)) => {
+            let receiving_log = ReceivingLog {
+                id: Some(record.id),
+                lotcode: record.lotcode,
+                company_name: record.company_name,
+                item_name: record.item_name,
+                temperature: record.temperature,
+                date: record.date.unwrap_or_default(),
+                org_id: record.org_id.unwrap_or(0),
+            };
+            HttpResponse::Ok().json(receiving_log)
+        },
+        Ok(None) => HttpResponse::NotFound().json(serde_json::json!({"error": "Receiving log not found"})),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
+        }
+    }
+}
+
+async fn get_all_receiving_logs(
+    data: web::Data<AppState>,
+) -> impl Responder {
+    match sqlx::query!(
+        "SELECT id, lotcode, company_name, item_name, temperature, date::text as date, org_id FROM receiving_log ORDER BY date DESC"
+    )
+    .fetch_all(&data.db_pool)
+    .await
+    {
+        Ok(records) => {
+            let logs: Vec<ReceivingLog> = records.into_iter().map(|record| {
+                ReceivingLog {
+                    id: Some(record.id),
+                    lotcode: record.lotcode,
+                    company_name: record.company_name,
+                    item_name: record.item_name,
+                    temperature: record.temperature,
+                    date: record.date.unwrap_or_default(),
+                    org_id: record.org_id.unwrap_or(0),
+                }
+            }).collect();
+            HttpResponse::Ok().json(logs)
+        },
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
+        }
+    }
+}
+
+async fn update_receiving_log(
+    path: web::Path<i32>,
+    receiving_log: web::Json<ReceivingLogInput>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let id = path.into_inner();
+    
+    // Parse the date string to NaiveDate
+    let date = match NaiveDate::parse_from_str(&receiving_log.date, "%Y-%m-%d") {
+        Ok(date) => date,
+        Err(_) => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": "Invalid date format. Use YYYY-MM-DD"
+            }));
+        }
+    };
+    
+    match sqlx::query!(
+        "UPDATE receiving_log SET lotcode = $1, company_name = $2, item_name = $3, temperature = $4, date = $5, org_id = $6 
+         WHERE id = $7 RETURNING id",
+        receiving_log.lotcode,
+        receiving_log.company_name,
+        receiving_log.item_name,
+        receiving_log.temperature,
+        date,
+        receiving_log.org_id,
+        id
+    )
+    .fetch_optional(&data.db_pool)
+    .await
+    {
+        Ok(Some(_)) => {
+            let updated_log = ReceivingLog {
+                id: Some(id),
+                lotcode: receiving_log.lotcode.clone(),
+                company_name: receiving_log.company_name.clone(),
+                item_name: receiving_log.item_name.clone(),
+                temperature: receiving_log.temperature.clone(),
+                date: receiving_log.date.clone(),
+                org_id: receiving_log.org_id,
+            };
+            HttpResponse::Ok().json(updated_log)
+        }
+        Ok(None) => HttpResponse::NotFound().json(serde_json::json!({"error": "Receiving log not found"})),
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
+        }
+    }
+}
+
+async fn delete_receiving_log(
+    path: web::Path<i32>,
+    data: web::Data<AppState>,
+) -> impl Responder {
+    let id = path.into_inner();
+    
+    match sqlx::query!("DELETE FROM receiving_log WHERE id = $1 RETURNING id", id)
+        .fetch_optional(&data.db_pool)
+        .await
+    {
+        Ok(Some(_)) => HttpResponse::NoContent().finish(),
+        Ok(None) => HttpResponse::NotFound().json(serde_json::json!({"error": "Receiving log not found"})),
         Err(e) => {
             eprintln!("Database error: {}", e);
             HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
@@ -1686,6 +1888,15 @@ pub fn configure_app(config: &mut web::ServiceConfig, db_pool: Pool<Postgres>) {
                         .route("/{id}", web::get().to(get_problem_log))
                         .route("/{id}", web::put().to(update_problem_log))
                         .route("/{id}", web::delete().to(delete_problem_log))
+                )
+                // Receiving Log endpoints
+                .service(
+                    web::scope("/receivinglogs")
+                        .route("", web::post().to(create_receiving_log))
+                        .route("", web::get().to(get_all_receiving_logs))
+                        .route("/{id}", web::get().to(get_receiving_log))
+                        .route("/{id}", web::put().to(update_receiving_log))
+                        .route("/{id}", web::delete().to(delete_receiving_log))
                 )
         );
 }
