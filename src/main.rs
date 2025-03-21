@@ -1,8 +1,8 @@
-use actix_web::{web, App, HttpResponse, HttpServer, Responder, middleware::Logger};
+use actix_web::{web, HttpRequest, App, HttpResponse, HttpServer, Responder, middleware::Logger};
 use actix_cors::Cors;
 use dotenv::dotenv;
 use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgPoolOptions, Pool, Postgres, types::chrono::NaiveDate};
+use sqlx::{postgres::PgPoolOptions, Pool, Postgres, types::chrono::NaiveDate, Row};
 use std::env;
 
 // Import auth module
@@ -114,6 +114,7 @@ struct Recipe {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct IngredientInput {
+    pub id: Option<i32>,
     pub lotcode: String,
     pub name: String,
     pub date: String, // For user input as string
@@ -159,6 +160,53 @@ pub struct AppState {
 async fn health_check() -> impl Responder {
     HttpResponse::Ok().json(serde_json::json!({"status": "healthy"}))
 }
+
+// Secure endpoint pattern - use this as a guide when updating all endpoints
+// This is a demo function showing the secure pattern - commented out for now to fix compilation
+/*
+async fn secure_endpoint_pattern(
+    data: web::Data<AppState>,
+    org_id: OrgId, // Extract authenticated org ID
+    path_id: web::Path<i32>, // Example path parameter
+) -> impl Responder {
+    let resource_id = path_id.into_inner();
+    
+    // Example security check - would use actual table name instead of "resources"
+    // First check if the requested resource belongs to the authenticated organization
+    match sqlx::query!(
+        "SELECT org_id FROM ingredients WHERE id = $1", // Just an example, use the actual table
+        resource_id
+    )
+    .fetch_optional(&data.db_pool)
+    .await
+    {
+        Ok(Some(record)) => {
+            // Verify org_id matches the authenticated user's organization
+            if record.org_id != org_id.0 {
+                return HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "You don't have permission to access this resource"
+                }));
+            }
+            
+            // If authorized, proceed with the actual operation
+            // ... actual resource handling code here
+            
+            HttpResponse::Ok().json(serde_json::json!({"status": "success"}))
+        },
+        Ok(None) => {
+            HttpResponse::NotFound().json(serde_json::json!({
+                "error": "Resource not found"
+            }))
+        },
+        Err(e) => {
+            eprintln!("Database error: {}", e);
+            HttpResponse::InternalServerError().json(serde_json::json!({
+                "error": "Internal server error"
+            }))
+        }
+    }
+}
+*/
 
 // Organization endpoints
 async fn create_organization(
@@ -211,23 +259,23 @@ async fn get_organization(
     }
 }
 
-async fn get_all_organizations(
-    data: web::Data<AppState>,
-) -> impl Responder {
-    match sqlx::query_as!(
-        Organization,
-        "SELECT id, name, email FROM organizations"
-    )
-    .fetch_all(&data.db_pool)
-    .await
-    {
-        Ok(orgs) => HttpResponse::Ok().json(orgs),
-        Err(e) => {
-            eprintln!("Database error: {}", e);
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
-        }
-    }
-}
+// async fn get_all_organizations(
+//     data: web::Data<AppState>,
+// ) -> impl Responder {
+//     match sqlx::query_as!(
+//         Organization,
+//         "SELECT id, name, email FROM organizations"
+//     )
+//     .fetch_all(&data.db_pool)
+//     .await
+//     {
+//         Ok(orgs) => HttpResponse::Ok().json(orgs),
+//         Err(e) => {
+//             eprintln!("Database error: {}", e);
+//             HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
+//         }
+//     }
+// }
 
 async fn update_organization(
     path: web::Path<i32>,
@@ -311,10 +359,50 @@ async fn create_employee(
 }
 
 async fn get_employee(
+    req: HttpRequest,
     path: web::Path<i32>,
     data: web::Data<AppState>,
 ) -> impl Responder {
     let id = path.into_inner();
+    
+    // Extract auth token from request
+    let token = match req.headers().get("Authorization") {
+        Some(header) => {
+            match header.to_str() {
+                Ok(header_str) => {
+                    if header_str.starts_with("Bearer ") {
+                        &header_str[7..]
+                    } else {
+                        return HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": "Invalid authorization header format"
+                        }));
+                    }
+                },
+                Err(_) => {
+                    return HttpResponse::Unauthorized().json(serde_json::json!({
+                        "error": "Invalid authorization header"
+                    }));
+                }
+            }
+        },
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Authorization header is missing"
+            }));
+        }
+    };
+    
+    // Verify token and get organization ID
+    let claims = match auth::verify_token(token) {
+        Ok(claims) => claims,
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid auth token"
+            }));
+        }
+    };
+    
+    let auth_org_id = claims.org_id;
     
     match sqlx::query!(
         "SELECT id, name, role, org_id FROM employees WHERE id = $1",
@@ -324,6 +412,14 @@ async fn get_employee(
     .await
     {
         Ok(Some(record)) => {
+            // Security check: Verify the authenticated user belongs to the same organization
+            // as the requested resource
+            if record.org_id.unwrap_or(0) != auth_org_id {
+                return HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "You don't have permission to access this employee"
+                }));
+            }
+            
             let employee = Employee {
                 id: Some(record.id),
                 name: record.name,
@@ -341,10 +437,51 @@ async fn get_employee(
 }
 
 async fn get_all_employees(
+    req: HttpRequest,
     data: web::Data<AppState>,
 ) -> impl Responder {
+    // Extract auth token from request
+    let token = match req.headers().get("Authorization") {
+        Some(header) => {
+            match header.to_str() {
+                Ok(header_str) => {
+                    if header_str.starts_with("Bearer ") {
+                        &header_str[7..]
+                    } else {
+                        return HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": "Invalid authorization header format"
+                        }));
+                    }
+                },
+                Err(_) => {
+                    return HttpResponse::Unauthorized().json(serde_json::json!({
+                        "error": "Invalid authorization header"
+                    }));
+                }
+            }
+        },
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Authorization header is missing"
+            }));
+        }
+    };
+    
+    // Verify token and get organization ID
+    let claims = match auth::verify_token(token) {
+        Ok(claims) => claims,
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid auth token"
+            }));
+        }
+    };
+    
+    let org_id = claims.org_id;
+
     match sqlx::query!(
-        "SELECT id, name, role, org_id FROM employees"
+        "SELECT id, name, role, org_id FROM employees WHERE org_id = $1",
+        org_id
     )
     .fetch_all(&data.db_pool)
     .await
@@ -463,10 +600,50 @@ async fn create_ingredient(
 }
 
 async fn get_ingredient(
+    req: HttpRequest,
     path: web::Path<i32>,
     data: web::Data<AppState>,
 ) -> impl Responder {
     let id = path.into_inner();
+    
+    // Extract auth token from request
+    let token = match req.headers().get("Authorization") {
+        Some(header) => {
+            match header.to_str() {
+                Ok(header_str) => {
+                    if header_str.starts_with("Bearer ") {
+                        &header_str[7..]
+                    } else {
+                        return HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": "Invalid authorization header format"
+                        }));
+                    }
+                },
+                Err(_) => {
+                    return HttpResponse::Unauthorized().json(serde_json::json!({
+                        "error": "Invalid authorization header"
+                    }));
+                }
+            }
+        },
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Authorization header is missing"
+            }));
+        }
+    };
+    
+    // Verify token and get organization ID
+    let claims = match auth::verify_token(token) {
+        Ok(claims) => claims,
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid auth token"
+            }));
+        }
+    };
+    
+    let auth_org_id = claims.org_id;
     
     match sqlx::query!(
         "SELECT id, lotcode, name, date::text as date, org_id FROM ingredients WHERE id = $1",
@@ -476,6 +653,14 @@ async fn get_ingredient(
     .await
     {
         Ok(Some(record)) => {
+            // Security check: Verify the authenticated user belongs to the same organization
+            // as the requested resource
+            if record.org_id.unwrap_or(0) != auth_org_id {
+                return HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "You don't have permission to access this ingredient"
+                }));
+            }
+            
             let ingredient = Ingredient {
                 id: Some(record.id),
                 lotcode: record.lotcode,
@@ -494,10 +679,51 @@ async fn get_ingredient(
 }
 
 async fn get_all_ingredients(
+    req: HttpRequest,
     data: web::Data<AppState>,
 ) -> impl Responder {
+    // Extract auth token from request
+    let token = match req.headers().get("Authorization") {
+        Some(header) => {
+            match header.to_str() {
+                Ok(header_str) => {
+                    if header_str.starts_with("Bearer ") {
+                        &header_str[7..]
+                    } else {
+                        return HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": "Invalid authorization header format"
+                        }));
+                    }
+                },
+                Err(_) => {
+                    return HttpResponse::Unauthorized().json(serde_json::json!({
+                        "error": "Invalid authorization header"
+                    }));
+                }
+            }
+        },
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Authorization header is missing"
+            }));
+        }
+    };
+    
+    // Verify token and get organization ID
+    let claims = match auth::verify_token(token) {
+        Ok(claims) => claims,
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid auth token"
+            }));
+        }
+    };
+    
+    let org_id = claims.org_id;
+
     match sqlx::query!(
-        "SELECT id, lotcode, name, date::text as date, org_id FROM ingredients"
+        "SELECT id, lotcode, name, date::text as date, org_id FROM ingredients WHERE org_id = $1",
+        org_id
     )
     .fetch_all(&data.db_pool)
     .await
@@ -516,10 +742,11 @@ async fn get_all_ingredients(
         },
         Err(e) => {
             eprintln!("Database error: {}", e);
-            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Internal server error"}))
+            HttpResponse::InternalServerError().json(serde_json::json!({"error": "Failed to fetch ingredients"}))
         }
     }
 }
+
 
 async fn update_ingredient(
     path: web::Path<i32>,
@@ -527,7 +754,7 @@ async fn update_ingredient(
     data: web::Data<AppState>,
 ) -> impl Responder {
     let id = path.into_inner();
-    
+
     // Parse the date string to NaiveDate
     let date = match NaiveDate::parse_from_str(&ingredient.date, "%Y-%m-%d") {
         Ok(date) => date,
@@ -634,10 +861,50 @@ async fn create_receiving_log(
 }
 
 async fn get_receiving_log(
+    req: HttpRequest,
     path: web::Path<i32>,
     data: web::Data<AppState>,
 ) -> impl Responder {
     let id = path.into_inner();
+    
+    // Extract auth token from request
+    let token = match req.headers().get("Authorization") {
+        Some(header) => {
+            match header.to_str() {
+                Ok(header_str) => {
+                    if header_str.starts_with("Bearer ") {
+                        &header_str[7..]
+                    } else {
+                        return HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": "Invalid authorization header format"
+                        }));
+                    }
+                },
+                Err(_) => {
+                    return HttpResponse::Unauthorized().json(serde_json::json!({
+                        "error": "Invalid authorization header"
+                    }));
+                }
+            }
+        },
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Authorization header is missing"
+            }));
+        }
+    };
+    
+    // Verify token and get organization ID
+    let claims = match auth::verify_token(token) {
+        Ok(claims) => claims,
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid auth token"
+            }));
+        }
+    };
+    
+    let auth_org_id = claims.org_id;
     
     match sqlx::query!(
         "SELECT id, lotcode, company_name, item_name, temperature, date::text as date, org_id 
@@ -648,6 +915,14 @@ async fn get_receiving_log(
     .await
     {
         Ok(Some(record)) => {
+            // Security check: Verify the authenticated user belongs to the same organization
+            // as the requested resource
+            if record.org_id.unwrap_or(0) != auth_org_id {
+                return HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "You don't have permission to access this receiving log"
+                }));
+            }
+            
             let receiving_log = ReceivingLog {
                 id: Some(record.id),
                 lotcode: record.lotcode,
@@ -668,10 +943,52 @@ async fn get_receiving_log(
 }
 
 async fn get_all_receiving_logs(
+    req: HttpRequest,
     data: web::Data<AppState>,
 ) -> impl Responder {
+    // Extract auth token from request
+    let token = match req.headers().get("Authorization") {
+        Some(header) => {
+            match header.to_str() {
+                Ok(header_str) => {
+                    if header_str.starts_with("Bearer ") {
+                        &header_str[7..]
+                    } else {
+                        return HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": "Invalid authorization header format"
+                        }));
+                    }
+                },
+                Err(_) => {
+                    return HttpResponse::Unauthorized().json(serde_json::json!({
+                        "error": "Invalid authorization header"
+                    }));
+                }
+            }
+        },
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Authorization header is missing"
+            }));
+        }
+    };
+    
+    // Verify token and get organization ID
+    let claims = match auth::verify_token(token) {
+        Ok(claims) => claims,
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid auth token"
+            }));
+        }
+    };
+    
+    let org_id = claims.org_id;
+
     match sqlx::query!(
-        "SELECT id, lotcode, company_name, item_name, temperature, date::text as date, org_id FROM receiving_log ORDER BY date DESC"
+        "SELECT id, lotcode, company_name, item_name, temperature, date::text as date, org_id 
+         FROM receiving_log WHERE org_id = $1 ORDER BY date DESC",
+        org_id
     )
     .fetch_all(&data.db_pool)
     .await
@@ -848,10 +1165,50 @@ async fn create_recipe(
 }
 
 async fn get_recipe(
+    req: HttpRequest,
     path: web::Path<i32>,
     data: web::Data<AppState>,
 ) -> impl Responder {
     let id = path.into_inner();
+    
+    // Extract auth token from request
+    let token = match req.headers().get("Authorization") {
+        Some(header) => {
+            match header.to_str() {
+                Ok(header_str) => {
+                    if header_str.starts_with("Bearer ") {
+                        &header_str[7..]
+                    } else {
+                        return HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": "Invalid authorization header format"
+                        }));
+                    }
+                },
+                Err(_) => {
+                    return HttpResponse::Unauthorized().json(serde_json::json!({
+                        "error": "Invalid authorization header"
+                    }));
+                }
+            }
+        },
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Authorization header is missing"
+            }));
+        }
+    };
+    
+    // Verify token and get organization ID
+    let claims = match auth::verify_token(token) {
+        Ok(claims) => claims,
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid auth token"
+            }));
+        }
+    };
+    
+    let auth_org_id = claims.org_id;
     
     // Get the recipe
     match sqlx::query!(
@@ -864,6 +1221,14 @@ async fn get_recipe(
     .await
     {
         Ok(Some(record)) => {
+            // Security check: Verify the authenticated user belongs to the same organization
+            // as the requested resource
+            if record.org_id.unwrap_or(0) != auth_org_id {
+                return HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "You don't have permission to access this recipe"
+                }));
+            }
+            
             let recipe = Recipe {
                 id: Some(record.id),
                 lotcode: record.lotcode,
@@ -884,12 +1249,53 @@ async fn get_recipe(
 }
 
 async fn get_all_recipes(
+    req: HttpRequest,
     data: web::Data<AppState>,
 ) -> impl Responder {
+    // Extract auth token from request
+    let token = match req.headers().get("Authorization") {
+        Some(header) => {
+            match header.to_str() {
+                Ok(header_str) => {
+                    if header_str.starts_with("Bearer ") {
+                        &header_str[7..]
+                    } else {
+                        return HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": "Invalid authorization header format"
+                        }));
+                    }
+                },
+                Err(_) => {
+                    return HttpResponse::Unauthorized().json(serde_json::json!({
+                        "error": "Invalid authorization header"
+                    }));
+                }
+            }
+        },
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Authorization header is missing"
+            }));
+        }
+    };
+    
+    // Verify token and get organization ID
+    let claims = match auth::verify_token(token) {
+        Ok(claims) => claims,
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid auth token"
+            }));
+        }
+    };
+    
+    let org_id = claims.org_id;
+
     match sqlx::query!(
         "SELECT r.id, r.lotcode, r.name, r.date_made::text as date_made, r.org_id, r.description,
          ARRAY(SELECT ingredient_id FROM recipe_ingredients WHERE recipe_id = r.id)::int[] as ingredients
-         FROM recipes r"
+         FROM recipes r WHERE r.org_id = $1",
+        org_id
     )
     .fetch_all(&data.db_pool)
     .await
@@ -1156,10 +1562,50 @@ async fn create_batch(
 }
 
 async fn get_batch(
+    req: HttpRequest,
     path: web::Path<i32>,
     data: web::Data<AppState>,
 ) -> impl Responder {
     let id = path.into_inner();
+    
+    // Extract auth token from request
+    let token = match req.headers().get("Authorization") {
+        Some(header) => {
+            match header.to_str() {
+                Ok(header_str) => {
+                    if header_str.starts_with("Bearer ") {
+                        &header_str[7..]
+                    } else {
+                        return HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": "Invalid authorization header format"
+                        }));
+                    }
+                },
+                Err(_) => {
+                    return HttpResponse::Unauthorized().json(serde_json::json!({
+                        "error": "Invalid authorization header"
+                    }));
+                }
+            }
+        },
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Authorization header is missing"
+            }));
+        }
+    };
+    
+    // Verify token and get organization ID
+    let claims = match auth::verify_token(token) {
+        Ok(claims) => claims,
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid auth token"
+            }));
+        }
+    };
+    
+    let auth_org_id = claims.org_id;
     
     // Get the basic batch information
     let batch_record = match sqlx::query!(
@@ -1170,7 +1616,16 @@ async fn get_batch(
     .fetch_optional(&data.db_pool)
     .await
     {
-        Ok(Some(record)) => record,
+        Ok(Some(record)) => {
+            // Security check: Verify the authenticated user belongs to the same organization
+            // as the requested resource
+            if record.org_id.unwrap_or(0) != auth_org_id {
+                return HttpResponse::Forbidden().json(serde_json::json!({
+                    "error": "You don't have permission to access this batch"
+                }));
+            }
+            record
+        },
         Ok(None) => return HttpResponse::NotFound().json(serde_json::json!({"error": "Batch not found"})),
         Err(e) => {
             eprintln!("Database error: {}", e);
@@ -1216,12 +1671,53 @@ async fn get_batch(
 }
 
 async fn get_all_batches(
+    req: HttpRequest,
     data: web::Data<AppState>,
 ) -> impl Responder {
-    // Get all batches
+    // Extract auth token from request
+    let token = match req.headers().get("Authorization") {
+        Some(header) => {
+            match header.to_str() {
+                Ok(header_str) => {
+                    if header_str.starts_with("Bearer ") {
+                        &header_str[7..]
+                    } else {
+                        return HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": "Invalid authorization header format"
+                        }));
+                    }
+                },
+                Err(_) => {
+                    return HttpResponse::Unauthorized().json(serde_json::json!({
+                        "error": "Invalid authorization header"
+                    }));
+                }
+            }
+        },
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Authorization header is missing"
+            }));
+        }
+    };
+    
+    // Verify token and get organization ID
+    let claims = match auth::verify_token(token) {
+        Ok(claims) => claims,
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid auth token"
+            }));
+        }
+    };
+    
+    let org_id = claims.org_id;
+
+    // Get all batches for this organization
     let batch_records = match sqlx::query!(
         "SELECT id, org_id, employee, recipe_lotcode, batch_lot_code, date_made::text as date_made, amount_made 
-         FROM batches ORDER BY id DESC"
+         FROM batches WHERE org_id = $1 ORDER BY id DESC",
+        org_id
     )
     .fetch_all(&data.db_pool)
     .await
@@ -1540,21 +2036,99 @@ async fn create_problem_log(
 }
 
 async fn get_problem_log(
+    req: HttpRequest,
     path: web::Path<i32>,
     data: web::Data<AppState>,
 ) -> impl Responder {
     let id = path.into_inner();
     
-    // Get the problem log
+    // Extract auth token from request
+    let token = match req.headers().get("Authorization") {
+        Some(header) => {
+            match header.to_str() {
+                Ok(header_str) => {
+                    if header_str.starts_with("Bearer ") {
+                        &header_str[7..]
+                    } else {
+                        return HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": "Invalid authorization header format"
+                        }));
+                    }
+                },
+                Err(_) => {
+                    return HttpResponse::Unauthorized().json(serde_json::json!({
+                        "error": "Invalid authorization header"
+                    }));
+                }
+            }
+        },
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Authorization header is missing"
+            }));
+        }
+    };
+    
+    // Verify token and get organization ID
+    let claims = match auth::verify_token(token) {
+        Ok(claims) => claims,
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid auth token"
+            }));
+        }
+    };
+    
+    let auth_org_id = claims.org_id;
+    
+    // First check if org_id column exists in problem_logs table
+    let column_check = sqlx::query!("
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'problem_logs' AND column_name = 'org_id'
+    ")
+    .fetch_optional(&data.db_pool)
+    .await;
+
+    let has_org_id = matches!(column_check, Ok(Some(_)));
+
+    // Get the problem log without assuming org_id column exists
+    // Since SQLx validates queries at compile time, we need a version without the org_id column
+    // Get the problem log record
     let problem_log_record = match sqlx::query!(
-        "SELECT id, is_open, date_opened::text as date_opened, customer_name, problem_type, problem_description, 
-         recall, date_resolved::text as date_resolved FROM problem_logs WHERE id = $1",
+        "SELECT id, is_open, date_opened::text as date_opened, customer_name, problem_type, 
+         problem_description, recall, date_resolved::text as date_resolved
+         FROM problem_logs WHERE id = $1",
         id
     )
     .fetch_optional(&data.db_pool)
     .await
     {
-        Ok(Some(record)) => record,
+        Ok(Some(record)) => {
+            // If org_id column exists, do an additional check for authorization
+            if has_org_id {
+                // Use dynamic SQL for the org_id check
+                let sql = format!("SELECT org_id FROM problem_logs WHERE id = {}", id);
+                let org_result = sqlx::query(&sql)
+                    .fetch_optional(&data.db_pool)
+                    .await;
+                
+                // If we get a valid org_id, check permission
+                if let Ok(Some(org_record)) = org_result {
+                    if let Ok(org_id) = org_record.try_get::<i32, _>("org_id") {
+                        if org_id != auth_org_id {
+                            return HttpResponse::Forbidden().json(serde_json::json!({
+                                "error": "You don't have permission to access this problem log"
+                            }));
+                        }
+                    }
+                }
+            } else {
+                // Skip security check and log warning
+                eprintln!("Warning: org_id column not found in problem_logs table - cannot verify organization access");
+            }
+            record
+        },
         Ok(None) => return HttpResponse::NotFound().json(serde_json::json!({"error": "Problem log not found"})),
         Err(e) => {
             eprintln!("Database error: {}", e);
@@ -1594,13 +2168,75 @@ async fn get_problem_log(
 }
 
 async fn get_all_problem_logs(
+    req: HttpRequest,
     data: web::Data<AppState>,
 ) -> impl Responder {
-    // Get all problem logs
-    let problem_log_records = match sqlx::query!(
+    // Extract auth token from request
+    let token = match req.headers().get("Authorization") {
+        Some(header) => {
+            match header.to_str() {
+                Ok(header_str) => {
+                    if header_str.starts_with("Bearer ") {
+                        &header_str[7..]
+                    } else {
+                        return HttpResponse::Unauthorized().json(serde_json::json!({
+                            "error": "Invalid authorization header format"
+                        }));
+                    }
+                },
+                Err(_) => {
+                    return HttpResponse::Unauthorized().json(serde_json::json!({
+                        "error": "Invalid authorization header"
+                    }));
+                }
+            }
+        },
+        None => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Authorization header is missing"
+            }));
+        }
+    };
+    
+    // Verify token and get organization ID
+    let claims = match auth::verify_token(token) {
+        Ok(claims) => claims,
+        Err(_) => {
+            return HttpResponse::Unauthorized().json(serde_json::json!({
+                "error": "Invalid auth token"
+            }));
+        }
+    };
+    
+    let org_id = claims.org_id;
+
+    // First, check if org_id column exists in problem_logs table
+    let column_check = sqlx::query!("
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'problem_logs' AND column_name = 'org_id'
+    ")
+    .fetch_optional(&data.db_pool)
+    .await;
+
+    // Build the right query based on whether org_id column exists
+    let sql_query = if let Ok(Some(_)) = column_check {
+        format!("SELECT id, is_open, date_opened::text as date_opened, customer_name, problem_type, problem_description, 
+                recall, date_resolved::text as date_resolved 
+                FROM problem_logs 
+                WHERE org_id = {} 
+                ORDER BY id DESC", org_id)
+    } else {
+        // Fall back to getting all problem logs if org_id column doesn't exist
+        eprintln!("Warning: org_id column not found in problem_logs table - cannot filter by organization");
         "SELECT id, is_open, date_opened::text as date_opened, customer_name, problem_type, problem_description, 
-         recall, date_resolved::text as date_resolved FROM problem_logs ORDER BY id DESC"
-    )
+        recall, date_resolved::text as date_resolved 
+        FROM problem_logs 
+        ORDER BY id DESC".to_string()
+    };
+    
+    // Use direct SQL query
+    let problem_log_records = match sqlx::query(&sql_query)
     .fetch_all(&data.db_pool)
     .await
     {
@@ -1616,7 +2252,15 @@ async fn get_all_problem_logs(
 
     // For each problem log, get its assigned employees
     for record in problem_log_records {
-        let problem_log_id = record.id;
+        // Get fields from the PgRow
+        let problem_log_id: i32 = record.try_get("id").unwrap_or_default();
+        let is_open: bool = record.try_get("is_open").unwrap_or_default();
+        let date_opened: Option<String> = record.try_get("date_opened").unwrap_or_default();
+        let customer_name: String = record.try_get("customer_name").unwrap_or_default();
+        let problem_type: String = record.try_get("problem_type").unwrap_or_default();
+        let problem_description: String = record.try_get("problem_description").unwrap_or_default();
+        let recall: bool = record.try_get("recall").unwrap_or_default();
+        let date_resolved: Option<String> = record.try_get("date_resolved").unwrap_or_default();
 
         // Get the assigned employees
         let assigned_employees = match sqlx::query!(
@@ -1635,15 +2279,15 @@ async fn get_all_problem_logs(
 
         // Create the complete problem log object
         let problem_log = ProblemLog {
-            id: Some(record.id),
-            is_open: record.is_open,
-            date_opened: record.date_opened.unwrap_or_default(),
-            customer_name: record.customer_name,
-            problem_type: record.problem_type,
+            id: Some(problem_log_id),
+            is_open,
+            date_opened: date_opened.unwrap_or_default(),
+            customer_name,
+            problem_type,
             assigned_to: assigned_employees,
-            problem_description: record.problem_description,
-            recall: record.recall,
-            date_resolved: record.date_resolved,
+            problem_description,
+            recall,
+            date_resolved,
         };
 
         problem_logs.push(problem_log);
@@ -1839,7 +2483,7 @@ pub fn configure_app(config: &mut web::ServiceConfig, db_pool: Pool<Postgres>) {
                 .service(
                     web::scope("/orgs")
                         .route("", web::post().to(create_organization))
-                        .route("", web::get().to(get_all_organizations))
+                        // .route("", web::get().to(get_all_organizations))
                         .route("/{id}", web::get().to(get_organization))
                         .route("/{id}", web::put().to(update_organization))
                         .route("/{id}", web::delete().to(delete_organization))

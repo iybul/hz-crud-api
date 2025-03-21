@@ -20,10 +20,11 @@ use crate::Organization;
 // JWT Claims for token
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String,     // Subject (org ID)
-    pub exp: usize,      // Expiration time (as UTC timestamp)
-    pub iat: usize,      // Issued at (as UTC timestamp)
-    pub jti: String,     // JWT ID (unique identifier for this token)
+    pub sub: String,        // Subject (org ID)
+    pub exp: usize,         // Expiration time (as UTC timestamp)
+    pub iat: usize,         // Issued at (as UTC timestamp)
+    pub jti: String,        // JWT ID (unique identifier for this token)
+    pub org_id: i32,        // Organization ID (explicit for authorization)
 }
 
 // Login request payload
@@ -101,6 +102,7 @@ pub fn generate_token(org_id: i32) -> Result<String, AuthError> {
         exp,
         iat: Utc::now().timestamp() as usize,
         jti: Uuid::new_v4().to_string(),
+        org_id, // Add the organization ID explicitly
     };
     
     encode(
@@ -388,8 +390,28 @@ pub async fn verify_auth(
                 return Err(AuthError::Unauthorized("Token has expired".to_string()));
             }
             
+            // Extract and validate JWT to double-check org_id
+            let verified_claims = verify_token(&token)?;
+            
+            if verified_claims.org_id != record.org_id {
+                return Err(AuthError::Unauthorized("Token organization mismatch".to_string()));
+            }
+            
             Ok(record.org_id)
         }
         None => Err(AuthError::Unauthorized("Invalid token".to_string())),
     }
+}
+
+// Authorization middleware to check if user has access to requested organization data
+pub async fn check_org_authorization(
+    org_id: i32,
+    auth_org_id: i32,
+) -> Result<(), AuthError> {
+    // Simple check: user can only access their own organization's data
+    if org_id != auth_org_id {
+        return Err(AuthError::Unauthorized("Access to this organization's data is forbidden".to_string()));
+    }
+    
+    Ok(())
 }
